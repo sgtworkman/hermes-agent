@@ -11312,8 +11312,166 @@ def _report_dashboard_status() -> int:
     return len(pids)
 
 
+def _is_loopback_dashboard_host(host: str) -> bool:
+    """Return True when ``host`` is safe for local token helper requests."""
+    normalized = (host or "").strip().lower().strip("[]")
+    if normalized == "localhost":
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _dashboard_base_url(args) -> str:
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    port = int(getattr(args, "port", 9119) or 9119)
+    bracketed_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"http://{bracketed_host}:{port}"
+
+
+def _dashboard_fetch(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+    data: str | bytes | None = None,
+    timeout: int = 5,
+) -> tuple[int, dict[str, str], str]:
+    """Small stdlib HTTP helper for dashboard local-token commands."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    body: bytes | None
+    if data is None or isinstance(data, bytes):
+        body = data
+    else:
+        body = data.encode("utf-8")
+
+    req = Request(url, data=body, headers=headers or {}, method=method.upper())
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - loopback helper only
+            raw = resp.read()
+            return resp.status, dict(resp.headers.items()), raw.decode("utf-8", "replace")
+    except HTTPError as exc:
+        raw = exc.read()
+        return exc.code, dict(exc.headers.items()), raw.decode("utf-8", "replace")
+
+
+def _extract_dashboard_session_token(html: str) -> str | None:
+    """Extract the injected SPA dashboard session token from index HTML."""
+    import re
+
+    patterns = [
+        r"__HERMES_SESSION_TOKEN__\s*[=:]\s*[\"']([^\"']+)",
+        r"sessionToken\s*[=:]\s*[\"']([^\"']+)",
+        r"dashboardSessionToken\s*[=:]\s*[\"']([^\"']+)",
+        r"X-Hermes-Session-Token\s*[=:]\s*[\"']([^\"']+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _get_dashboard_session_token(args) -> str:
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    if not _is_loopback_dashboard_host(host):
+        print(
+            "Error: refusing to fetch dashboard token from non-loopback host. "
+            "Use a local 127.0.0.1/localhost dashboard bind.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    base_url = _dashboard_base_url(args)
+    try:
+        status, _headers, html = _dashboard_fetch(f"{base_url}/")
+    except OSError as exc:
+        print(f"Error: dashboard not reachable at {base_url}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if status >= 400:
+        print(f"Error: dashboard returned HTTP {status} at {base_url}/", file=sys.stderr)
+        sys.exit(1)
+    token = _extract_dashboard_session_token(html)
+    if not token:
+        print(
+            "Error: could not find dashboard session token in the local dashboard page. "
+            "Is the dashboard running and serving the current SPA?",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return token
+
+
+def _parse_dashboard_curl_headers(values: list[str] | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for value in values or []:
+        if ":" not in value:
+            print(f"Error: invalid header {value!r}; expected 'Name: value'", file=sys.stderr)
+            sys.exit(2)
+        name, header_value = value.split(":", 1)
+        name = name.strip()
+        if not name:
+            print(f"Error: invalid header {value!r}; empty name", file=sys.stderr)
+            sys.exit(2)
+        headers[name] = header_value.strip()
+    return headers
+
+
+def _cmd_dashboard_token(args) -> None:
+    print(_get_dashboard_session_token(args))
+    sys.exit(0)
+
+
+def _cmd_dashboard_curl(args) -> None:
+    path = getattr(args, "api_path", None)
+    if not path:
+        print("Usage: hermes dashboard curl /api/path", file=sys.stderr)
+        sys.exit(2)
+    if not str(path).startswith("/api/"):
+        print("Error: dashboard curl is scoped to /api/* paths only", file=sys.stderr)
+        sys.exit(2)
+
+    token = _get_dashboard_session_token(args)
+    headers = _parse_dashboard_curl_headers(getattr(args, "header", None))
+    headers["X-Hermes-Session-Token"] = token
+    data = getattr(args, "data", None)
+    method = (getattr(args, "method", None) or ("POST" if data is not None else "GET")).upper()
+    base_url = _dashboard_base_url(args)
+    url = f"{base_url}{path}"
+    try:
+        status, response_headers, body = _dashboard_fetch(
+            url,
+            headers=headers,
+            method=method,
+            data=data,
+        )
+    except OSError as exc:
+        print(f"Error: dashboard not reachable at {base_url}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "show_headers", False):
+        print(f"HTTP {status}")
+        for name, value in response_headers.items():
+            print(f"{name}: {value}")
+        print()
+    if body:
+        print(body, end="" if body.endswith("\n") else "\n")
+    sys.exit(0 if status < 400 else 1)
+
+
 def cmd_dashboard(args):
-    """Start the web UI server, or (with --stop/--status) manage running ones."""
+    """Start the web UI server, or (with --stop/--status/local helpers) manage it."""
+    action = getattr(args, "action", None)
+    if action == "token":
+        _cmd_dashboard_token(args)
+    if action == "curl":
+        _cmd_dashboard_curl(args)
+
     # --status: report running dashboards and exit, no deps needed.
     if getattr(args, "status", False):
         count = _report_dashboard_status()
@@ -14711,6 +14869,45 @@ Examples:
         "--status",
         action="store_true",
         help="List running hermes dashboard processes and exit",
+    )
+    dashboard_parser.add_argument(
+        "action",
+        nargs="?",
+        choices=("token", "curl"),
+        help=(
+            "Local helpers: 'token' prints the current loopback dashboard session token; "
+            "'curl' calls a /api/* path with that token."
+        ),
+    )
+    dashboard_parser.add_argument(
+        "api_path",
+        nargs="?",
+        help="/api/* path for `hermes dashboard curl` (example: /api/status)",
+    )
+    dashboard_parser.add_argument(
+        "-X",
+        "--method",
+        default=None,
+        help="HTTP method for `dashboard curl` (default GET, or POST when --data is set)",
+    )
+    dashboard_parser.add_argument(
+        "-d",
+        "--data",
+        default=None,
+        help="Request body for `dashboard curl`; implies POST unless --method is set",
+    )
+    dashboard_parser.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        default=[],
+        help="Extra header for `dashboard curl`, e.g. -H 'Content-Type: application/json'",
+    )
+    dashboard_parser.add_argument(
+        "-i",
+        "--show-headers",
+        action="store_true",
+        help="Print response status and headers before the body for `dashboard curl`",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 

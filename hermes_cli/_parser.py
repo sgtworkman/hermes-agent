@@ -73,6 +73,8 @@ Examples:
     hermes dashboard              Start web UI dashboard (port 9119)
     hermes dashboard --stop       Stop running dashboard processes
     hermes dashboard --status     List running dashboard processes
+    hermes dashboard token        Print current local dashboard session token
+    hermes dashboard curl /api/status  Call local dashboard API with session token
 
 For more help on a command:
     hermes <command> --help

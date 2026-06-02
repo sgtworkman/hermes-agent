@@ -22,7 +22,8 @@ def _ns(**kw):
     """Build an argparse.Namespace with dashboard defaults plus overrides."""
     defaults = dict(
         port=9119, host="127.0.0.1", no_open=False, insecure=False,
-        tui=False, stop=False, status=False,
+        tui=False, stop=False, status=False, action=None, api_path=None,
+        method="GET", data=None, header=[], show_headers=False,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -121,6 +122,46 @@ class TestDashboardStop:
              pytest.raises(SystemExit) as exc:
             cmd_dashboard(_ns(stop=True))
         assert exc.value.code == 0
+
+
+class TestDashboardLocalHelpers:
+    def test_token_prints_injected_dashboard_token(self, capsys):
+        html = '<script>window.__HERMES_SESSION_TOKEN__ = "tok_123";</script>'
+        with patch("hermes_cli.main._dashboard_fetch", return_value=(200, {}, html)), \
+             pytest.raises(SystemExit) as exc:
+            cmd_dashboard(_ns(action="token"))
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "tok_123"
+
+    def test_token_refuses_non_loopback_host(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cmd_dashboard(_ns(action="token", host="0.0.0.0"))
+        assert exc.value.code == 2
+        assert "refusing to fetch dashboard token from non-loopback host" in capsys.readouterr().err
+
+    def test_curl_fetches_token_and_sends_session_header(self, capsys):
+        calls = []
+
+        def fake_fetch(url, *, headers=None, method="GET", data=None, timeout=5):
+            calls.append((url, headers or {}, method, data))
+            if url == "http://127.0.0.1:9119/":
+                return (200, {}, '<script>sessionToken: "tok_abc"</script>')
+            return (200, {"content-type": "application/json"}, '{"ok": true}')
+
+        with patch("hermes_cli.main._dashboard_fetch", side_effect=fake_fetch), \
+             pytest.raises(SystemExit) as exc:
+            cmd_dashboard(_ns(action="curl", api_path="/api/config", header=["X-Test: yes"]))
+        assert exc.value.code == 0
+        assert calls[-1][0] == "http://127.0.0.1:9119/api/config"
+        assert calls[-1][1]["X-Hermes-Session-Token"] == "tok_abc"
+        assert calls[-1][1]["X-Test"] == "yes"
+        assert capsys.readouterr().out.strip() == '{"ok": true}'
+
+    def test_curl_requires_api_path(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cmd_dashboard(_ns(action="curl"))
+        assert exc.value.code == 2
+        assert "Usage: hermes dashboard curl /api/path" in capsys.readouterr().err
 
 
 class TestLifecycleFlagsTakePrecedence:
