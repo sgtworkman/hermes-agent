@@ -20,6 +20,16 @@ describe('completionErrorText', () => {
     expect(completionErrorText('here is your answer')).toBeNull()
     expect(completionErrorText('   ')).toBeNull()
   })
+
+  it('labels empty model streams as transport failures instead of generic API failures', () => {
+    const text = completionErrorText(
+      'API call failed after 3 retries: Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response).'
+    )
+
+    expect(text).toBe(
+      'Model transport stream failed: Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response).'
+    )
+  })
 })
 
 describe('toTodoPayload', () => {

@@ -75,10 +75,20 @@ const COMPLETION_ERROR_PATTERNS = [
   /^(Provider|Gateway)\s+error:/i
 ]
 
+const EMPTY_MODEL_STREAM_PATTERN = /Provider returned an empty stream with no finish_reason.*malformed SSE response/i
+
 export function completionErrorText(finalText: string): string | null {
   const text = finalText.trim()
 
-  return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
+  if (!text || !COMPLETION_ERROR_PATTERNS.some(re => re.test(text))) {
+    return null
+  }
+
+  if (EMPTY_MODEL_STREAM_PATTERN.test(text)) {
+    return text.replace(/^API call failed after \d+ retries:\s*/i, 'Model transport stream failed: ')
+  }
+
+  return text
 }
 
 export const SUBAGENT_EVENT_TYPES = new Set([
