@@ -28,6 +28,10 @@ import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
 import { getLatestSessionMessages } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
+import {
+  compressionBoundaryResumePrompt,
+  shouldRequestFreshSessionAfterCompression
+} from '@/lib/gateway-events'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
@@ -755,6 +759,19 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         }
 
         requestVoiceConversationStart()
+
+        return
+      }
+
+      const currentSessionId = activeSessionIdRef.current
+
+      if (shouldRequestFreshSessionAfterCompression(event, currentSessionId)) {
+        const resumePrompt = compressionBoundaryResumePrompt(event, currentSessionId)
+        startFreshSessionDraft()
+
+        if (resumePrompt) {
+          requestComposerInsert(resumePrompt, { mode: 'block', target: 'main' })
+        }
 
         return
       }
