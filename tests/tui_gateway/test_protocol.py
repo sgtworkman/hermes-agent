@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
@@ -117,6 +118,49 @@ def test_err_envelope(server):
     assert server._err("r2", 4001, "nope") == {
         "jsonrpc": "2.0", "id": "r2", "error": {"code": 4001, "message": "nope"},
     }
+
+
+def test_session_activate_honors_durable_compression_boundary(server, monkeypatch):
+    """A still-warm runtime must not bypass the sealed-session checkpoint."""
+    from hermes_cli.compression_boundary import build_compression_checkpoint, persist_compression_checkpoint
+
+    class _MetaDB:
+        def __init__(self):
+            self.values = {}
+
+        def set_meta(self, key, value):
+            self.values[key] = value
+
+        def get_meta(self, key):
+            return self.values.get(key)
+
+    db = _MetaDB()
+    checkpoint = build_compression_checkpoint(
+        "stored-sealed",
+        prompt="continue the interrupted qualification",
+    )
+    assert persist_compression_checkpoint(db, checkpoint)
+
+    server._sessions["runtime-sealed"] = {
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "stored-sealed",
+    }
+    monkeypatch.setattr(server, "_session_db", lambda _session: nullcontext(db))
+
+    try:
+        response = server._methods["session.activate"](
+            "activate-1",
+            {"session_id": "runtime-sealed", "omit_messages": True},
+        )
+    finally:
+        server._sessions.pop("runtime-sealed", None)
+
+    result = response["result"]
+    assert result["compression_boundary"]["old_session_id"] == "stored-sealed"
+    assert result["messages"] == []
+    assert "continue the interrupted qualification" in result["compression_boundary"]["resume_prompt"]
 
 
 @pytest.mark.parametrize("kind", ["legacy", "hard-only", "dynamic-getattr"])

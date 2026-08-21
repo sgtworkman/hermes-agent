@@ -872,6 +872,23 @@ export function useSessionActions({
               return
             }
 
+            // A terminal boundary can be discovered through session.activate
+            // when the exhausted runtime is still warm in this renderer. The
+            // cold session.resume path handles the same payload below.
+            if (activated.compression_boundary) {
+              const resumePrompt = activated.compression_boundary.resume_prompt?.trim()
+              runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
+              sessionStateByRuntimeIdRef.current.delete(cachedRuntimeId)
+              dropSessionState(cachedRuntimeId)
+              startFreshSessionDraft()
+
+              if (resumePrompt) {
+                setComposerDraft(resumePrompt)
+              }
+
+              return
+            }
+
             if (activated.session_key && activated.session_key !== storedSessionId) {
               runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
               sessionStateByRuntimeIdRef.current.delete(cachedRuntimeId)
@@ -1155,6 +1172,7 @@ export function useSessionActions({
         if (resumed.compression_boundary) {
           const resumePrompt = resumed.compression_boundary.resume_prompt?.trim()
           startFreshSessionDraft()
+
           if (resumePrompt) {
             setComposerDraft(resumePrompt)
           }

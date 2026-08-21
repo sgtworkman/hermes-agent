@@ -27,9 +27,11 @@ import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
 import { getLatestSessionMessages } from '@/hermes'
+import { translateNow } from '@/i18n'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import {
   compressionBoundaryResumePrompt,
+  compressionBoundarySessionId,
   shouldRequestFreshSessionAfterCompression
 } from '@/lib/gateway-events'
 import { isMessagingSource } from '@/lib/session-source'
@@ -42,6 +44,7 @@ import { requestVoiceConversationStart } from '@/store/composer'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronReviewRequest, setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
+import { notify } from '@/store/notifications'
 import { $previewTarget } from '@/store/preview'
 import {
   $activeGatewayProfile,
@@ -776,9 +779,28 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         return
       }
 
+      const exhaustedBackgroundSessionId = compressionBoundarySessionId(event)
+
+      if (exhaustedBackgroundSessionId) {
+        // Background work must not steal the foreground, but terminal
+        // exhaustion must remain visible and actionable.
+        notify({
+          id: `compression-boundary:${exhaustedBackgroundSessionId}`,
+          kind: 'warning',
+          title: translateNow('desktop.compressionBoundaryTitle'),
+          message: translateNow('desktop.compressionBoundaryBody'),
+          action: {
+            label: translateNow('desktop.compressionBoundaryOpen'),
+            onClick: () => navigate(sessionRoute(exhaustedBackgroundSessionId))
+          }
+        })
+
+        return
+      }
+
       handleDesktopGatewayEvent(event)
     },
-    [handleDesktopGatewayEvent, startFreshSessionDraft]
+    [handleDesktopGatewayEvent, navigate, startFreshSessionDraft]
   )
 
   useGatewayBoot({

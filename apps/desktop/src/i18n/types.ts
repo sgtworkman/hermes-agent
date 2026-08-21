@@ -2808,6 +2808,9 @@ export interface Translations {
     editFailed: string
     editTurnUnavailable: string
     resumeFailed: string
+    compressionBoundaryTitle: string
+    compressionBoundaryBody: string
+    compressionBoundaryOpen: string
     resumeStrandedTitle: string
     resumeStrandedBody: string
     resumeRetry: string

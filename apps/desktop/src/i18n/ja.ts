@@ -2925,6 +2925,10 @@ export const ja = defineLocale({
     editFailed: '編集に失敗しました',
     editTurnUnavailable: 'このターンはサーバー履歴にありません（圧縮で削除された可能性があります）。',
     resumeFailed: '再開に失敗しました',
+    compressionBoundaryTitle: '新しいセッションでの続行が必要です',
+    compressionBoundaryBody:
+      'このタスクはコンテキストを使い切りました。続行用の復旧チェックポイントが準備できています。',
+    compressionBoundaryOpen: '復旧を開く',
     resumeStrandedTitle: 'このセッションを読み込めませんでした',
     resumeStrandedBody:
       'このセッションへの接続に失敗し、自動再試行も停止しました。ゲートウェイが実行中か確認してから、もう一度お試しください。',

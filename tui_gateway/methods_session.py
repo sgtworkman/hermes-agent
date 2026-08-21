@@ -1099,6 +1099,23 @@ def _(rid, params: dict) -> dict:
         return err
     assert session is not None
 
+    # A live runtime can remain cached after its turn crosses a terminal
+    # compression boundary. Desktop's warm resume path calls session.activate
+    # instead of session.resume, so guarding only the cold-resume handler lets
+    # that cached runtime reopen the sealed transcript and strand the handoff.
+    session_key = str(session.get("session_key") or "").strip()
+    if session_key:
+        try:
+            from hermes_cli.compression_boundary import compression_boundary_resume_payload
+
+            with _session_db(session) as db:
+                boundary_payload = compression_boundary_resume_payload(db, session_key)
+        except Exception:
+            logger.debug("compression boundary activate guard failed", exc_info=True)
+            boundary_payload = None
+        if boundary_payload is not None:
+            return _ok(rid, boundary_payload)
+
     return _ok(
         rid,
         _live_session_payload(

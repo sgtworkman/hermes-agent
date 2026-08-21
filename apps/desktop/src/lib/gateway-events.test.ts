@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   approvalReplaySessionId,
   compressionBoundaryResumePrompt,
+  compressionBoundarySessionId,
   gatewayEventRequiresSessionId,
   resolveGatewayEventSessionId,
   shouldRequestFreshSessionAfterCompression
@@ -188,5 +189,23 @@ describe('gateway event routing', () => {
 
     expect(compressionBoundaryResumePrompt(event, 'session-a')).toBe('continue from checkpoint')
     expect(compressionBoundaryResumePrompt(event, 'session-old')).toBeNull()
+  })
+
+  it('identifies a valid background boundary without treating unrelated events as recovery', () => {
+    expect(
+      compressionBoundarySessionId({
+        payload: { old_session_id: ' stored-background ', reason: 'compression_exhausted' },
+        session_id: 'runtime-background',
+        type: 'dashboard.new_session_requested'
+      })
+    ).toBe('stored-background')
+    expect(compressionBoundarySessionId({ type: 'message.complete', session_id: 'session-background' })).toBeNull()
+    expect(
+      compressionBoundarySessionId({
+        payload: { reason: 'manual_reset' },
+        session_id: 'session-background',
+        type: 'dashboard.new_session_requested'
+      })
+    ).toBeNull()
   })
 })

@@ -14,7 +14,13 @@ import {
   type SessionResumeResponse
 } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import {
+  $composerDraft,
+  clearSessionDraft,
+  setComposerDraft,
+  stashSessionDraft,
+  takeSessionDraft
+} from '@/store/composer'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile } from '@/store/profile'
 import { $projectScope, $projectTree, ALL_PROJECTS } from '@/store/projects'
 import {
@@ -1854,6 +1860,58 @@ describe('resumeSession warm-cache mapping integrity', () => {
       expect.objectContaining({ omit_messages: true, session_id: 'rt-A' })
     )
     expect(runtimeIdByStoredSessionIdRef.current.get('stored-A')).toBe('rt-A')
+  })
+
+  it('turns a warm cached compression boundary into a fresh draft with the durable handoff', async () => {
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([['rt-A', clientState('stored-A')]])
+    }
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          compression_boundary: {
+            old_session_id: 'stored-A',
+            reason: 'compression_exhausted',
+            resume_prompt: 'continue from the durable checkpoint'
+          },
+          session_id: 'stored-A',
+          session_key: 'stored-A',
+          resumed: 'stored-A',
+          message_count: 0,
+          messages: [],
+          running: false,
+          info: null
+        } as never
+      }
+
+      return {} as never
+    })
+
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ messages: [], session_id: 'stored-A' } as never)
+    setComposerDraft('')
+
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+    render(
+      <ResumeHarness
+        onReady={ready => (resume = ready)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('stored-A', true)
+
+    expect($composerDraft.get()).toBe('continue from the durable checkpoint')
+    expect(runtimeIdByStoredSessionIdRef.current.has('stored-A')).toBe(false)
+    expect(sessionStateByRuntimeIdRef.current.has('rt-A')).toBe(false)
+    expect(requestGateway.mock.calls.map(([method]) => method)).toContain('session.activate')
+    expect(requestGateway.mock.calls.map(([method]) => method)).not.toContain('session.resume')
   })
 
   it('preserves cached image attachments through an idle persisted transcript refresh', async () => {

@@ -38,11 +38,28 @@ export function shouldRequestFreshSessionAfterCompression(
   return !event.session_id ? true : event.session_id === activeSessionId
 }
 
+/** Return the durable sealed-session id for any valid boundary event. */
+export function compressionBoundarySessionId(event: RpcEventLike): string | null {
+  if (event.type !== 'dashboard.new_session_requested') {
+    return null
+  }
+
+  const payload = asRecord(event.payload)
+
+  if (payload.reason !== 'compression_exhausted') {
+    return null
+  }
+
+  // event.session_id is the live runtime id used for stream routing. Desktop
+  // navigation is keyed by the durable stored id carried in the payload.
+  const oldSessionId = typeof payload.old_session_id === 'string' ? payload.old_session_id.trim() : ''
+  const sessionId = oldSessionId || event.session_id?.trim()
+
+  return sessionId || null
+}
+
 /** Return the bounded, redacted handoff prompt carried by a current boundary. */
-export function compressionBoundaryResumePrompt(
-  event: RpcEventLike,
-  activeSessionId: null | string
-): string | null {
+export function compressionBoundaryResumePrompt(event: RpcEventLike, activeSessionId: null | string): string | null {
   if (!shouldRequestFreshSessionAfterCompression(event, activeSessionId)) {
     return null
   }

@@ -3276,6 +3276,9 @@ export const en: Translations = {
     editFailed: 'Edit failed',
     editTurnUnavailable: 'This turn is no longer in server history (it may have been compressed away).',
     resumeFailed: 'Resume failed',
+    compressionBoundaryTitle: 'Task needs a fresh session',
+    compressionBoundaryBody: 'This task exhausted its context. Its recovery checkpoint is ready to continue.',
+    compressionBoundaryOpen: 'Open recovery',
     resumeStrandedTitle: "Couldn't load this session",
     resumeStrandedBody:
       'The connection to this session failed and automatic retries gave up. Check that the gateway is running, then try again.',

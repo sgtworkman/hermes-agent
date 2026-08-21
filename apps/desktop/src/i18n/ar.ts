@@ -2684,6 +2684,9 @@ export const ar = defineLocale({
     editFailed: 'فشل التحرير',
     editTurnUnavailable: 'هذه الجولة لم تعد في سجل الخادم (ربما أزيلت بالضغط).',
     resumeFailed: 'فشل الاستئناف',
+    compressionBoundaryTitle: 'تحتاج المهمة إلى جلسة جديدة',
+    compressionBoundaryBody: 'استنفدت هذه المهمة سياقها. نقطة الاسترداد جاهزة للمتابعة.',
+    compressionBoundaryOpen: 'فتح الاسترداد',
     resumeStrandedTitle: 'تعذّر تحميل هذه الجلسة',
     resumeStrandedBody:
       'فشل الاتصال بهذه الجلسة وتوقفت إعادة المحاولة التلقائية. تأكد من تشغيل البوابة، ثم حاول مجددا.',
