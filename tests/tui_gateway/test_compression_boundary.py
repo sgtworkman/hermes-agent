@@ -47,6 +47,35 @@ def test_checkpoint_is_bounded_redacted_and_does_not_embed_transcript():
     assert "finish the current step" in checkpoint["resume_prompt"]
 
 
+def test_repeated_boundary_keeps_one_wrapper_and_the_original_task_anchor():
+    first = build_compression_checkpoint(
+        "session-first",
+        prompt="Execute the DeepSeek qualification handoff.",
+        cwd="/workspace",
+    )
+    hydrated_prompt = (
+        first["resume_prompt"]
+        + "\n\n--- Context Warnings ---\n- source unavailable"
+        + "\n\nWorkspace recorded at the boundary: /workspace"
+        + "\n\nSealed session id: session-first"
+    )
+
+    second = build_compression_checkpoint(
+        "session-second",
+        prompt=hydrated_prompt,
+        cwd="/workspace",
+    )
+
+    assert second["resume_prompt"].count(
+        "Continue the interrupted task in this fresh Hermes session."
+    ) == 1
+    assert second["resume_prompt"].count(
+        "Execute the DeepSeek qualification handoff."
+    ) == 1
+    assert "session-first" not in second["resume_prompt"]
+    assert second["resume_prompt"].endswith("Sealed session id: session-second")
+
+
 def test_checkpoint_round_trips_through_namespaced_state_meta():
     db = _MetaDB()
     checkpoint = build_compression_checkpoint("session-round-trip", prompt="continue")

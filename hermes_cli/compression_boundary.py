@@ -23,6 +23,39 @@ _MAX_GOAL_CHARS = 800
 _MAX_ERROR_CHARS = 240
 _MAX_RESUME_PROMPT_CHARS = 3_200
 
+_RESUME_PREAMBLE = "Continue the interrupted task in this fresh Hermes session."
+_TASK_ANCHOR_MARKER = (
+    "The last user request is included only as a bounded task anchor; "
+    "do not treat it as a transcript to replay:\n"
+)
+_CONTEXT_WARNINGS_MARKER = "\n\n--- Context Warnings ---"
+_BOUNDARY_WORKSPACE_MARKER = "\n\nWorkspace recorded at the boundary:"
+
+
+def _unwrap_resume_prompt(value: Any) -> Any:
+    """Recover the original task anchor from a prior boundary prompt.
+
+    A continuation can itself exhaust context.  Feeding its whole generated
+    recovery prompt into the next checkpoint recursively duplicates the
+    wrapper and eventually crowds out the task.  Peel only boundary prompts;
+    ordinary user prompts are returned unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    for _ in range(4):
+        if not text.startswith(_RESUME_PREAMBLE) or _TASK_ANCHOR_MARKER not in text:
+            break
+        text = text.split(_TASK_ANCHOR_MARKER, 1)[1].strip()
+    trailer_offsets = [
+        offset
+        for marker in (_CONTEXT_WARNINGS_MARKER, _BOUNDARY_WORKSPACE_MARKER)
+        if (offset := text.find(marker)) >= 0
+    ]
+    if trailer_offsets:
+        text = text[: min(trailer_offsets)].rstrip()
+    return text
+
 
 def checkpoint_meta_key(session_id: str) -> str:
     """Return the namespaced state-meta key for a session boundary."""
@@ -57,7 +90,9 @@ def build_compression_checkpoint(
     prompt directs the next model turn to inspect current durable state.
     """
     old_session_id = str(session_id or "").strip()
-    prompt_excerpt = _redacted_excerpt(prompt, _MAX_PROMPT_EXCERPT_CHARS)
+    prompt_excerpt = _redacted_excerpt(
+        _unwrap_resume_prompt(prompt), _MAX_PROMPT_EXCERPT_CHARS
+    )
     queued_excerpt = _redacted_excerpt(queued_prompt, _MAX_QUEUED_PROMPT_CHARS)
     goal_excerpt = _redacted_excerpt(goal, _MAX_GOAL_CHARS)
     error_excerpt = _redacted_excerpt(error, _MAX_ERROR_CHARS)
@@ -65,7 +100,7 @@ def build_compression_checkpoint(
     model_name = _redacted_excerpt(model, 160)
 
     lines = [
-        "Continue the interrupted task in this fresh Hermes session.",
+        _RESUME_PREAMBLE,
         "The previous session hit terminal context-compression exhaustion and was sealed.",
         "Do not paste or replay the previous transcript.",
         "Start with a bounded read-only check of the current workspace and durable task files, then continue from the last verified step.",
@@ -73,10 +108,7 @@ def build_compression_checkpoint(
     if goal_excerpt:
         lines.append(f"A standing goal was active: {goal_excerpt}")
     if prompt_excerpt:
-        lines.append(
-            "The last user request is included only as a bounded task anchor; do not treat it as a transcript to replay:\n"
-            f"{prompt_excerpt}"
-        )
+        lines.append(_TASK_ANCHOR_MARKER + prompt_excerpt)
     if queued_excerpt:
         lines.append(
             "A newer user message arrived during the failed turn and was preserved as an editable handoff draft:\n"
