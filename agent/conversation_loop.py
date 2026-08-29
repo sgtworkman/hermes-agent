@@ -40,6 +40,7 @@ from agent.conversation_compression import (
 from agent.context_engine import automatic_compaction_status_message
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
+from agent.forced_overflow_pressure import relieve_forced_overflow_tail_pressure
 from agent.message_metadata import append_message
 from agent.turn_context import (
     _compression_warrants_another_preflight_pass,
@@ -6063,6 +6064,28 @@ def run_conversation(
 
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
+                    _pre_pressure_messages = messages
+                    _overflow_request_tokens = estimate_request_tokens_rough(
+                        api_messages,
+                        tools=agent.tools or None,
+                    )
+                    (
+                        messages,
+                        _duplicate_user_rows_removed,
+                        _bounded_assistant_rows,
+                    ) = relieve_forced_overflow_tail_pressure(
+                        messages,
+                        current_tokens=_overflow_request_tokens,
+                        context_length=compressor.context_length,
+                    )
+                    if _duplicate_user_rows_removed or _bounded_assistant_rows:
+                        agent._buffer_status(
+                            "🧯 Provider-overflow recovery removed "
+                            f"{_duplicate_user_rows_removed} duplicate retry "
+                            "prompt(s) and excerpted "
+                            f"{_bounded_assistant_rows} oversized completed "
+                            "reply/replies."
+                        )
                     _overflow_input = messages
                     # Option A (LCM issue 441): pass the OVERHEAD-AWARE request size (msgs + tool
                     # schemas + system), not the tool-blind message count, so LCM forced-overflow
@@ -6070,7 +6093,7 @@ def run_conversation(
                     # _should_force_overflow_recovery. (approx_tokens stays for the status display.)
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message,
-                        approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
+                        approx_tokens=_overflow_request_tokens,
                         task_id=effective_task_id,
                         force=True,
                     )
@@ -6082,6 +6105,7 @@ def run_conversation(
                         # attempt and end the turn softly so the gateway does
                         # NOT auto-reset the session (#9893/#35809).
                         compression_attempts -= 1
+                        messages = _pre_pressure_messages
                         agent._persist_session(messages, conversation_history)
                         return _compression_deferred_result(
                             agent, messages, api_call_count

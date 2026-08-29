@@ -1,0 +1,128 @@
+"""Deterministic request shrinking after a provider proves context overflow."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+from agent.model_metadata import estimate_messages_tokens_rough
+from agent.turn_context import drop_stale_api_content
+
+
+_CHARS_PER_TOKEN = 4
+_RECENT_MESSAGE_FLOOR = 8
+FORCED_OVERFLOW_TARGET_RATIO = 0.85
+_MIN_ASSISTANT_EXCERPT_CHARS = 4_000
+FORCED_OVERFLOW_EXCERPT_MARKER = (
+    "\n\n...[completed assistant reply excerpted during provider-overflow "
+    "recovery; full text remains in session history]...\n\n"
+)
+
+
+def _is_plain_user_retry(message: Any) -> bool:
+    return bool(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and isinstance(message.get("content"), str)
+        and not message.get("_compressed_summary")
+        and not message.get("_todo_snapshot_synthetic")
+    )
+
+
+def relieve_forced_overflow_tail_pressure(
+    messages: List[Dict[str, Any]],
+    *,
+    current_tokens: int,
+    context_length: int,
+) -> tuple[List[Dict[str, Any]], int, int]:
+    """Reclaim request budget that protected-tail compaction cannot.
+
+    This is gated by a provider-proven overflow.  It represents consecutive
+    byte-identical real user retries once, then excerpts oversized completed
+    assistant text inside the bounded recent floor until the request has about
+    15% response headroom.  User-authored text is never truncated.  The normal
+    compaction commit archives the original full rows before these active
+    replacements are persisted.
+
+    Returns ``(messages, duplicate_user_rows_removed, assistant_rows_bounded)``.
+    """
+    if (
+        not messages
+        or context_length <= 0
+        or current_tokens < context_length
+    ):
+        return messages, 0, 0
+
+    out: List[Dict[str, Any]] = []
+    duplicate_user_rows_removed = 0
+    for original in messages:
+        msg = original.copy() if isinstance(original, dict) else original
+        previous = out[-1] if out else None
+        if (
+            _is_plain_user_retry(msg)
+            and _is_plain_user_retry(previous)
+            and previous.get("content") == msg.get("content")
+        ):
+            # Preserve the newest row metadata while representing the exact
+            # user bytes once.  This is retry deduplication, not fuzzy merging.
+            out[-1] = msg
+            duplicate_user_rows_removed += 1
+            continue
+        out.append(msg)
+
+    before_tokens = estimate_messages_tokens_rough(messages)
+    after_dedupe_tokens = estimate_messages_tokens_rough(out)
+    target_tokens = int(context_length * FORCED_OVERFLOW_TARGET_RATIO)
+    still_needed = max(
+        0,
+        current_tokens
+        - target_tokens
+        - max(0, before_tokens - after_dedupe_tokens),
+    )
+    if still_needed <= 0:
+        return out, duplicate_user_rows_removed, 0
+
+    bounded_assistant_rows = 0
+    tail_start = max(0, len(out) - _RECENT_MESSAGE_FLOOR)
+    for idx in range(tail_start, len(out)):
+        msg = out[idx]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if msg.get("_compressed_summary") or msg.get("tool_calls"):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or len(content) <= _MIN_ASSISTANT_EXCERPT_CHARS:
+            continue
+
+        # Two-token margin covers estimator rounding and prevents an exact
+        # boundary from provoking one more provider retry.
+        reclaim_chars = (still_needed + 2) * _CHARS_PER_TOKEN
+        desired_chars = max(
+            _MIN_ASSISTANT_EXCERPT_CHARS,
+            len(content) - reclaim_chars,
+        )
+        if desired_chars >= len(content):
+            continue
+        payload_chars = max(
+            2,
+            desired_chars - len(FORCED_OVERFLOW_EXCERPT_MARKER),
+        )
+        head_chars = max(1, int(payload_chars * 0.7))
+        tail_chars = max(1, payload_chars - head_chars)
+        msg["content"] = (
+            content[:head_chars]
+            + FORCED_OVERFLOW_EXCERPT_MARKER
+            + content[-tail_chars:]
+        )
+        drop_stale_api_content(msg)
+        bounded_assistant_rows += 1
+        reclaimed = max(
+            0,
+            before_tokens - estimate_messages_tokens_rough(out),
+        )
+        still_needed = max(0, current_tokens - target_tokens - reclaimed)
+        if still_needed <= 0:
+            break
+
+    if duplicate_user_rows_removed or bounded_assistant_rows:
+        return out, duplicate_user_rows_removed, bounded_assistant_rows
+    return messages, 0, 0
