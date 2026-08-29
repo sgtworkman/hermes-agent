@@ -49,6 +49,7 @@ import contextvars
 import copy
 import functools
 import hashlib
+import ipaddress
 import inspect
 import json
 import logging
@@ -4209,6 +4210,38 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
         if isinstance(identity, str):
             normalized[identity_field] = identity.lower()
     return normalized
+
+
+def _is_local_compatible_endpoint(base_url: str = "") -> bool:
+    """Return whether *base_url* is a local/private OpenAI-compatible route.
+
+    This is deliberately network-identity based rather than model-name based.
+    Hermes uses private and carrier-grade addresses for LAN/DGX inference, and
+    those routes can safely receive a bounded auxiliary output parameter while
+    public/cloud providers retain the historical no-cap default.
+    """
+    hostname = base_url_hostname(str(base_url or "").strip())
+    if not hostname:
+        return False
+    hostname = hostname.strip("[]").lower().rstrip(".")
+    if (
+        hostname == "localhost"
+        or hostname.endswith(".localhost")
+        or hostname.endswith(".local")
+    ):
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return bool(
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address in ipaddress.ip_network("100.64.0.0/10")
+    )
 
 
 def _get_provider_chain() -> List[tuple]:
@@ -8982,7 +9015,7 @@ def _build_call_kwargs(
         kwargs["temperature"] = temperature
 
     if max_tokens is not None:
-        # We do NOT cap output by default. Most chat-completions providers treat
+        # We do NOT cap output by default. Most cloud/public chat-completions providers treat
         # an omitted max_tokens as "use the model's max output", which is what we
         # want for auxiliary tasks (compression summaries, titles, vision, etc.) —
         # an explicit cap only risks truncating a summary or 400-ing on providers
@@ -8994,7 +9027,9 @@ def _build_call_kwargs(
         # The one exception is the Anthropic Messages wire (MiniMax and any
         # ``/anthropic`` endpoint reached through the OpenAI SDK wrapper), where
         # max_tokens is a MANDATORY field — omitting it is a hard 400. Keep it only
-        # there.
+        # there. Local/private OpenAI-compatible routes are a third case: their
+        # bounded auxiliary calls must honor the caller's cap so a stalled
+        # compression summary cannot consume the entire context window.
         #
         # NVIDIA NIM (integrate.api.nvidia.com and local NIM endpoints) is a
         # second exception: some models—notably minimaxai/minimax-m3—return HTTP
@@ -9036,6 +9071,7 @@ def _build_call_kwargs(
             or _is_nvidia_nim
             or _is_moa
             or _is_gemini_native
+            or _is_local_compatible_endpoint(_effective_base)
         ):
             # Use auxiliary_max_tokens_param() so models that require
             # max_completion_tokens (GPT-5 family, Copilot) get the right
