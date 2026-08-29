@@ -1,9 +1,9 @@
-"""Regression tests for the post-ceiling session wedge.
+"""Regression tests for the post-no-progress session wedge.
 
-A turn that exhausts all 4 length-continuation attempts must leave the
-session usable: the next user message issues a fresh upstream request,
-inherits no continuation counter, and the partial text that WAS received
-is surfaced instead of dropped.
+A turn that receives three consecutive duplicate continuation fragments must
+leave the session usable: the next user message issues a fresh upstream
+request, inherits no continuation state, and productive partial text is
+surfaced instead of dropped.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def loop_agent():
         patch("run_agent.OpenAI"),
     ):
         a = AIAgent(
-            api_key="test-key-1234567890",
+            api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
@@ -62,16 +62,17 @@ def _run(agent, message, history=None):
         return agent.run_conversation(message, conversation_history=history)
 
 
-class TestContinuationCeilingWedge:
-    def _exhaust_ceiling(self, agent):
+class TestContinuationNoProgressWedge:
+    def _exhaust_no_progress(self, agent):
         agent.client.chat.completions.create.side_effect = [
             _stub("part one "), _stub("part two "),
             _stub("part three "), _stub("part four."),
+            _stub("part four."), _stub("part four."), _stub("part four."),
         ]
         return _run(agent, "write me a long report")
 
-    def test_partial_text_surfaced_at_ceiling(self, loop_agent):
-        result = self._exhaust_ceiling(loop_agent)
+    def test_partial_text_surfaced_at_no_progress_stop(self, loop_agent):
+        result = self._exhaust_no_progress(loop_agent)
         assert result["completed"] is False
         assert result["partial"] is True
         assert "part one" in (result["final_response"] or "")
@@ -82,10 +83,10 @@ class TestContinuationCeilingWedge:
         the provider instead of replaying wedge state."""
         from tests.run_agent.test_run_agent import _mock_response
 
-        result1 = self._exhaust_ceiling(loop_agent)
-        assert "truncated after 4 continuation attempts" in (result1.get("error") or "")
+        result1 = self._exhaust_no_progress(loop_agent)
+        assert "no progress after 3 attempts" in (result1.get("error") or "")
         calls_after_turn1 = loop_agent.client.chat.completions.create.call_count
-        assert calls_after_turn1 == 4
+        assert calls_after_turn1 == 7
 
         loop_agent.client.chat.completions.create.side_effect = [
             _mock_response(content="Hello! How can I help?", finish_reason="stop"),
@@ -100,11 +101,11 @@ class TestContinuationCeilingWedge:
         assert result2["final_response"] == "Hello! How can I help?"
         assert not result2.get("error")
 
-    def test_ceiling_replaces_scaffolding_with_settled_turn(self, loop_agent):
+    def test_no_progress_stop_replaces_scaffolding_with_settled_turn(self, loop_agent):
         """The persisted tail must not keep the continuation scaffolding.
         Unanswered "continue" nudges make every later turn resume the
         truncated response and re-exhaust the same ceiling."""
-        result = self._exhaust_ceiling(loop_agent)
+        result = self._exhaust_no_progress(loop_agent)
         msgs = result["messages"]
 
         nudges = [
@@ -126,7 +127,7 @@ class TestContinuationCeilingWedge:
         for part in ("part one", "part two", "part three", "part four"):
             assert part in content, "Stitched partial must keep every fragment."
 
-    def test_ceiling_not_labeled_network_error(self, loop_agent):
+    def test_no_progress_stop_not_labeled_network_error(self, loop_agent):
         """A finish_reason='length' stub is a truncation, not a network
         error — the user-facing message must not blame the network."""
         printed = []
@@ -137,15 +138,15 @@ class TestContinuationCeilingWedge:
             return original(text, **kwargs)
 
         with patch.object(loop_agent, "_vprint", side_effect=_capture):
-            self._exhaust_ceiling(loop_agent)
+            self._exhaust_no_progress(loop_agent)
 
         network_lines = [line for line in printed if "network error" in line.lower()]
         assert network_lines == [], (
             "Truncation must not be reported as a network error: "
             f"{network_lines!r}"
         )
-        assert any("truncated" in line.lower() for line in printed), (
-            "The user-facing message must name the truncation."
+        assert any("no progress" in line.lower() for line in printed), (
+            "The user-facing message must name the no-progress stop."
         )
 
     def test_continuation_requests_carry_no_marks(self, loop_agent):
@@ -197,10 +198,11 @@ class TestContinuationCeilingWedge:
         loop_agent.client.chat.completions.create.side_effect = [
             _stub("wedge one "), _stub("wedge two "),
             _stub("wedge three "), _stub("wedge four."),
+            _stub("wedge four."), _stub("wedge four."), _stub("wedge four."),
         ]
         result = _run(loop_agent, "another long report", history=reloaded_history)
 
-        assert "truncated after 4 continuation attempts" in (result.get("error") or "")
+        assert "no progress after 3 attempts" in (result.get("error") or "")
         prior = [
             m for m in result["messages"]
             if m.get("role") == "assistant"
@@ -216,7 +218,7 @@ class TestContinuationCeilingWedge:
         own full 4-attempt budget, not the exhausted counter."""
         from tests.run_agent.test_run_agent import _mock_response
 
-        result1 = self._exhaust_ceiling(loop_agent)
+        result1 = self._exhaust_no_progress(loop_agent)
         loop_agent.client.chat.completions.create.side_effect = [
             _stub("second turn partial "),
             _mock_response(content="and the rest.", finish_reason="stop"),
@@ -224,7 +226,7 @@ class TestContinuationCeilingWedge:
         result2 = _run(loop_agent, "try again", history=result1["messages"])
 
         assert result2["completed"] is True, (
-            "One truncation on a fresh turn must continue (1/4), not fail "
+            "One truncation on a fresh turn must continue, not fail "
             "with an inherited exhausted counter."
         )
         assert "second turn partial" in result2["final_response"]

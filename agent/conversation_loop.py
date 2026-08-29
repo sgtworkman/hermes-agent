@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -1964,6 +1965,8 @@ def run_conversation(
     failed = False
     codex_ack_continuations = 0
     length_continue_retries = 0
+    length_no_progress_retries = 0
+    length_fragment_fingerprints = set()
     # Total outer-loop exceptions this turn (#92450) — see _MAX_OUTER_LOOP_ERRORS.
     _outer_error_count = 0
     truncated_tool_call_retries = 0
@@ -3917,6 +3920,8 @@ def run_conversation(
                                         _frag.pop("_length_continuation_nudge", None)
                                 agent._session_messages = messages
                                 length_continue_retries = 0
+                                length_no_progress_retries = 0
+                                length_fragment_fingerprints.clear()
                                 truncated_response_parts = []
                                 retry_count = 0
                                 compression_attempts = 0
@@ -3949,15 +3954,32 @@ def run_conversation(
                                 getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
                                 and not getattr(assistant_message, "content", None)
                             )
-                            if not _is_empty_partial_stub:
+                            _fragment_content = getattr(assistant_message, "content", None)
+                            _fragment_fingerprint = None
+                            if _fragment_content:
+                                _fragment_fingerprint = hashlib.sha256(
+                                    " ".join(_fragment_content.split()).encode("utf-8")
+                                ).hexdigest()
+
+                            _fragment_made_progress = bool(
+                                _fragment_fingerprint
+                                and _fragment_fingerprint not in length_fragment_fingerprints
+                            )
+                            if _fragment_made_progress:
+                                length_fragment_fingerprints.add(_fragment_fingerprint)
+                                length_no_progress_retries = 0
+                            else:
+                                length_no_progress_retries += 1
+
+                            if not _is_empty_partial_stub and _fragment_made_progress:
                                 interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
-                                # Marked so the ceiling exit can drop the fragment trail.
+                                # Marked so a no-progress exit can drop the fragment trail.
                                 interim_msg["_length_continuation_fragment"] = True
                                 append_message(messages, interim_msg)
                                 if assistant_message.content:
                                     truncated_response_parts.append(assistant_message.content)
 
-                            if length_continue_retries < 4:
+                            if length_no_progress_retries < 3:
                                 _is_partial_stream_stub = (
                                     getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
                                 )
@@ -3971,18 +3993,18 @@ def run_conversation(
                                         f"{agent.log_prefix}↻ Stream interrupted mid "
                                         f"tool-call ({_tool_list}) — requesting "
                                         f"chunked retry "
-                                        f"({length_continue_retries}/4)..."
+                                        f"(attempt {length_continue_retries})..."
                                     )
                                 elif _is_partial_stream_stub:
                                     agent._vprint(
                                         f"{agent.log_prefix}↻ Stream interrupted — "
                                         f"requesting continuation "
-                                        f"({length_continue_retries}/4)..."
+                                        f"(attempt {length_continue_retries})..."
                                     )
                                 else:
                                     agent._vprint(
                                         f"{agent.log_prefix}↻ Requesting continuation "
-                                        f"({length_continue_retries}/4)..."
+                                        f"(attempt {length_continue_retries})..."
                                     )
 
                                 _continue_content = _get_continuation_prompt(
@@ -4001,8 +4023,8 @@ def run_conversation(
                             partial_response = agent._strip_think_blocks(_join_truncated_parts(truncated_response_parts)).strip()
                             if partial_response:
                                 agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Response still truncated "
-                                    f"after 4 continuation attempts — keeping the "
+                                    f"{agent.log_prefix}⚠️  Response continuation made "
+                                    f"no progress for 3 attempts — keeping the "
                                     f"partial response received so far.",
                                     force=True,
                                 )
@@ -4038,7 +4060,7 @@ def run_conversation(
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": "Response remained truncated after 4 continuation attempts",
+                                "error": "Response continuation made no progress after 3 attempts",
                             }
 
                     if agent.api_mode in {"chat_completions", "bedrock_converse", "anthropic_messages"}:
@@ -5433,6 +5455,7 @@ def run_conversation(
                             messages, system_message,
                             approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
                             task_id=effective_task_id,
+                            force=True,
                         )
                         conversation_history = conversation_history_after_compression(
                             agent, messages, conversation_history
@@ -5729,6 +5752,7 @@ def run_conversation(
                         messages, system_message,
                         approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
                         task_id=effective_task_id,
+                        force=True,
                     )
                     if messages is _overflow_input and compression_skipped_due_to_lock(agent):
                         # #69870 lock-skip: the provider proved the request
@@ -5893,6 +5917,7 @@ def run_conversation(
                                 messages, system_message,
                                 approx_tokens=request_input_estimate,
                                 task_id=effective_task_id,
+                                force=True,
                             )
                             if messages is _overflow_input and compression_skipped_due_to_lock(agent):
                                 compression_attempts -= 1
@@ -6047,6 +6072,7 @@ def run_conversation(
                         messages, system_message,
                         approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
                         task_id=effective_task_id,
+                        force=True,
                     )
                     if messages is _overflow_input and compression_skipped_due_to_lock(agent):
                         # #69870 lock-skip: the provider proved the request
@@ -8204,6 +8230,8 @@ def run_conversation(
                     final_response = _join_truncated_parts([*truncated_response_parts, final_response])
                     truncated_response_parts = []
                     length_continue_retries = 0
+                    length_no_progress_retries = 0
+                    length_fragment_fingerprints.clear()
                     # The continuation recovered, so the fragments stay in the transcript.
                     for _frag in messages:
                         if isinstance(_frag, dict):

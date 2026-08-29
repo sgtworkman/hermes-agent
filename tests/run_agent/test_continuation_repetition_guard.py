@@ -30,7 +30,7 @@ def loop_agent():
         patch("run_agent.OpenAI"),
     ):
         a = AIAgent(
-            api_key="test-key-1234567890",
+            api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
@@ -87,13 +87,18 @@ class TestContinuationRepetitionGuard:
         assert loop_agent.client.chat.completions.create.call_count == 1
 
     def test_legit_truncation_still_continues(self, loop_agent):
-        # Ordinary short truncated fragments still get continuation retries.
+        # Productive unique fragments are not stopped by a fixed retry ceiling.
+        from tests.run_agent.test_run_agent import _mock_response
+
         loop_agent.client.chat.completions.create.side_effect = [
             _stub("part one "), _stub("part two "),
-            _stub("part three "), _stub("part four."),
+            _stub("part three "), _stub("part four "),
+            _stub("part five "), _stub("part six "),
+            _mock_response(content="complete.", finish_reason="stop"),
         ]
 
         result = _run(loop_agent, "write me a long report")
 
-        assert result["partial"] is True
-        assert loop_agent.client.chat.completions.create.call_count == 4
+        assert result["completed"] is True
+        assert result["final_response"].endswith("complete.")
+        assert loop_agent.client.chat.completions.create.call_count == 7
