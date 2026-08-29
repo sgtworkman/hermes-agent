@@ -6080,6 +6080,7 @@ def run_conversation(
                         messages,
                         current_tokens=_overflow_request_tokens,
                         context_length=compressor.context_length,
+                        overflow_proven=True,
                     )
                     if _duplicate_user_rows_removed or _bounded_assistant_rows:
                         agent._buffer_status(

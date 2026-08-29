@@ -123,6 +123,7 @@ def test_input_overflow_relaxes_protected_tail_before_forced_compression():
         ANY,
         current_tokens=77_500,
         context_length=65_536,
+        overflow_proven=True,
     )
     compressed.assert_called_once()
     assert compressed.call_args.args[0] is pressure_messages

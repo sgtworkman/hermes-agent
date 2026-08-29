@@ -103,3 +103,37 @@ def test_distinct_or_separated_user_turns_are_never_collapsed():
         "same",
         "different",
     ]
+
+
+def test_provider_proof_overrides_low_estimate_and_reaches_assistant_anchor():
+    prompt = "P" * 14_000
+    messages = [
+        {"role": "assistant", "content": "A" * 80_000},
+        {"role": "user", "content": prompt},
+    ]
+    messages.extend(
+        {"role": "tool", "content": f"result-{index}"}
+        for index in range(9)
+    )
+    messages.extend(
+        [
+            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt},
+        ]
+    )
+
+    out, duplicate_users, bounded_assistants = (
+        relieve_forced_overflow_tail_pressure(
+            messages,
+            current_tokens=40_000,
+            context_length=65_536,
+            overflow_proven=True,
+        )
+    )
+
+    assert duplicate_users == 1
+    assert bounded_assistants == 1
+    bounded = out[0]["content"]
+    assert FORCED_OVERFLOW_EXCERPT_MARKER in bounded
+    assert len(bounded) <= 4_100
+    assert sum(m.get("content") == prompt for m in out) == 2

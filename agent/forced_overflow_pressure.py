@@ -9,7 +9,6 @@ from agent.turn_context import drop_stale_api_content
 
 
 _CHARS_PER_TOKEN = 4
-_RECENT_MESSAGE_FLOOR = 8
 FORCED_OVERFLOW_TARGET_RATIO = 0.85
 _MIN_ASSISTANT_EXCERPT_CHARS = 4_000
 FORCED_OVERFLOW_EXCERPT_MARKER = (
@@ -33,13 +32,17 @@ def relieve_forced_overflow_tail_pressure(
     *,
     current_tokens: int,
     context_length: int,
+    overflow_proven: bool = False,
 ) -> tuple[List[Dict[str, Any]], int, int]:
     """Reclaim request budget that protected-tail compaction cannot.
 
     This is gated by a provider-proven overflow.  It represents consecutive
     byte-identical real user retries once, then excerpts oversized completed
-    assistant text inside the bounded recent floor until the request has about
-    15% response headroom.  User-authored text is never truncated.  The normal
+    assistant anchor until the request has about 15% response headroom.  When
+    the provider proves overflow but the local estimate is below the window,
+    the newest oversized completed assistant anchor is reduced to the minimum
+    excerpt because the estimate is demonstrably non-authoritative.
+    User-authored text is never truncated.  The normal
     compaction commit archives the original full rows before these active
     replacements are persisted.
 
@@ -48,7 +51,7 @@ def relieve_forced_overflow_tail_pressure(
     if (
         not messages
         or context_length <= 0
-        or current_tokens < context_length
+        or (current_tokens < context_length and not overflow_proven)
     ):
         return messages, 0, 0
 
@@ -79,11 +82,12 @@ def relieve_forced_overflow_tail_pressure(
         - max(0, before_tokens - after_dedupe_tokens),
     )
     if still_needed <= 0:
-        return out, duplicate_user_rows_removed, 0
+        if not overflow_proven:
+            return out, duplicate_user_rows_removed, 0
 
     bounded_assistant_rows = 0
-    tail_start = max(0, len(out) - _RECENT_MESSAGE_FLOOR)
-    for idx in range(tail_start, len(out)):
+    estimate_disproven = overflow_proven and current_tokens < context_length
+    for idx in range(len(out) - 1, -1, -1):
         msg = out[idx]
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
@@ -95,11 +99,14 @@ def relieve_forced_overflow_tail_pressure(
 
         # Two-token margin covers estimator rounding and prevents an exact
         # boundary from provoking one more provider retry.
-        reclaim_chars = (still_needed + 2) * _CHARS_PER_TOKEN
-        desired_chars = max(
-            _MIN_ASSISTANT_EXCERPT_CHARS,
-            len(content) - reclaim_chars,
-        )
+        if estimate_disproven:
+            desired_chars = _MIN_ASSISTANT_EXCERPT_CHARS
+        else:
+            reclaim_chars = (still_needed + 2) * _CHARS_PER_TOKEN
+            desired_chars = max(
+                _MIN_ASSISTANT_EXCERPT_CHARS,
+                len(content) - reclaim_chars,
+            )
         if desired_chars >= len(content):
             continue
         payload_chars = max(
@@ -120,7 +127,7 @@ def relieve_forced_overflow_tail_pressure(
             before_tokens - estimate_messages_tokens_rough(out),
         )
         still_needed = max(0, current_tokens - target_tokens - reclaimed)
-        if still_needed <= 0:
+        if estimate_disproven or still_needed <= 0:
             break
 
     if duplicate_user_rows_removed or bounded_assistant_rows:
