@@ -6086,7 +6086,7 @@ def run_conversation(
                         agent._buffer_status(
                             "🧯 Provider-overflow recovery removed "
                             f"{_duplicate_user_rows_removed} duplicate retry "
-                            "prompt(s) and excerpted "
+                            "prompt copy/copies and excerpted "
                             f"{_bounded_assistant_rows} oversized completed "
                             "reply/replies."
                         )

@@ -15,6 +15,10 @@ FORCED_OVERFLOW_EXCERPT_MARKER = (
     "\n\n...[completed assistant reply excerpted during provider-overflow "
     "recovery; full text remains in session history]...\n\n"
 )
+FORCED_OVERFLOW_DUPLICATE_MARKER = (
+    "[Duplicate retry prompt represented once during provider-overflow "
+    "recovery; the identical full prompt follows.]"
+)
 
 
 def _is_plain_user_retry(message: Any) -> bool:
@@ -24,6 +28,7 @@ def _is_plain_user_retry(message: Any) -> bool:
         and isinstance(message.get("content"), str)
         and not message.get("_compressed_summary")
         and not message.get("_todo_snapshot_synthetic")
+        and not message.get("_provider_overflow_duplicate_retry")
     )
 
 
@@ -55,22 +60,35 @@ def relieve_forced_overflow_tail_pressure(
     ):
         return messages, 0, 0
 
-    out: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = [
+        original.copy() if isinstance(original, dict) else original
+        for original in messages
+    ]
     duplicate_user_rows_removed = 0
-    for original in messages:
-        msg = original.copy() if isinstance(original, dict) else original
-        previous = out[-1] if out else None
-        if (
-            _is_plain_user_retry(msg)
-            and _is_plain_user_retry(previous)
-            and previous.get("content") == msg.get("content")
-        ):
-            # Preserve the newest row metadata while representing the exact
-            # user bytes once.  This is retry deduplication, not fuzzy merging.
-            out[-1] = msg
-            duplicate_user_rows_removed += 1
+    run_start = 0
+    while run_start < len(out):
+        first = out[run_start]
+        if not _is_plain_user_retry(first):
+            run_start += 1
             continue
-        out.append(msg)
+        run_end = run_start + 1
+        while (
+            run_end < len(out)
+            and _is_plain_user_retry(out[run_end])
+            and out[run_end].get("content") == first.get("content")
+        ):
+            run_end += 1
+        for idx in range(run_start, run_end - 1):
+            # Keep list length and the newest full user row intact. Legacy
+            # rotation compression reloads the durable transcript whenever a
+            # candidate list becomes shorter; same-length markers therefore
+            # survive that persistence boundary while the append-only original
+            # rows remain archived and recoverable.
+            out[idx]["content"] = FORCED_OVERFLOW_DUPLICATE_MARKER
+            out[idx]["_provider_overflow_duplicate_retry"] = True
+            drop_stale_api_content(out[idx])
+            duplicate_user_rows_removed += 1
+        run_start = run_end
 
     before_tokens = estimate_messages_tokens_rough(messages)
     after_dedupe_tokens = estimate_messages_tokens_rough(out)
