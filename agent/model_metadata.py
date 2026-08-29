@@ -1879,6 +1879,34 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
     return None
 
 
+def minimum_output_rejection_proves_input_overflow(error_msg: str) -> bool:
+    """Return whether a one-token rejection proves the input fills the window.
+
+    Some OpenAI-compatible servers report only a lower bound for prompt tokens
+    while ``max_tokens`` is the binding constraint.  Reducing the output cap is
+    correct until the rejected cap reaches one token.  At that point, if the
+    reported prompt lower bound is at least the context window, no smaller
+    legal output cap exists: this is authoritative input-overflow evidence and
+    the caller must switch to context compression.
+    """
+    error_lower = error_msg.lower()
+    context_match = re.search(
+        r'maximum context length is (\d+)\s*token', error_lower
+    )
+    requested_match = re.search(
+        r'requested (\d+)\s*output tokens', error_lower
+    )
+    input_match = re.search(
+        r'prompt contains (?:at least )?(\d+)\s*input tokens', error_lower
+    )
+    if not (context_match and requested_match and input_match):
+        return False
+    return (
+        int(requested_match.group(1)) <= 1
+        and int(input_match.group(1)) >= int(context_match.group(1))
+    )
+
+
 def is_output_cap_error(error_msg: str) -> bool:
     """Return True if a 400 is about the OUTPUT cap (max_tokens) being too large.
 

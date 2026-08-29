@@ -1,6 +1,7 @@
 import pytest
 from agent.model_metadata import (
     is_output_cap_error,
+    minimum_output_rejection_proves_input_overflow,
     parse_available_output_tokens_from_error,
 )
 
@@ -191,3 +192,24 @@ class TestParseVllmTokenBasedOutputCap:
             cap = available
         assert real_input + cap <= window, f"did not converge: cap={cap}"
 
+    def test_one_token_rejection_proves_input_overflow(self):
+        msg = (
+            "This model's maximum context length is 65536 tokens. However, "
+            "you requested 1 output tokens and your prompt contains at least "
+            "65536 input tokens, for a total of at least 65537 tokens."
+        )
+        assert minimum_output_rejection_proves_input_overflow(msg) is True
+
+    @pytest.mark.parametrize(
+        ("requested", "prompt_tokens"),
+        [(2, 65535), (1, 65535), (2, 65536)],
+    )
+    def test_nonterminal_output_cap_rejection_is_not_input_proof(
+        self, requested, prompt_tokens
+    ):
+        msg = (
+            "This model's maximum context length is 65536 tokens. However, "
+            f"you requested {requested} output tokens and your prompt contains "
+            f"at least {prompt_tokens} input tokens."
+        )
+        assert minimum_output_rejection_proves_input_overflow(msg) is False

@@ -80,6 +80,7 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,
     get_context_length_from_provider_error,
     is_output_cap_error,
+    minimum_output_rejection_proves_input_overflow,
     parse_available_output_tokens_from_error,
     save_context_length,
 )
@@ -5855,7 +5856,26 @@ def run_conversation(
                     #
                     # Note: max_tokens = output token cap (one response).
                     #       context_length = total window (input + output combined).
-                    available_out = parse_available_output_tokens_from_error(error_msg)
+                    minimum_output_proves_input_overflow = (
+                        minimum_output_rejection_proves_input_overflow(error_msg)
+                    )
+                    if minimum_output_proves_input_overflow:
+                        # The earlier output-cap reductions were diagnostic
+                        # probes, not failed compression passes.  Once a legal
+                        # one-token response is still rejected because the
+                        # prompt lower bound fills the window, start the real
+                        # input-overflow recovery with its full bounded budget.
+                        compression_attempts = 0
+                        agent._buffer_status(
+                            "🧯 A one-token provider rejection proved the input "
+                            "itself fills the context window; starting bounded "
+                            "input-overflow recovery."
+                        )
+                    available_out = (
+                        None
+                        if minimum_output_proves_input_overflow
+                        else parse_available_output_tokens_from_error(error_msg)
+                    )
                     if available_out is not None:
                         # This is an output-cap error, not input overflow.
                         # The provider's available_tokens is the authoritative
