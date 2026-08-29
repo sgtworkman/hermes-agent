@@ -6065,9 +6065,12 @@ def run_conversation(
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
                     _pre_pressure_messages = messages
-                    _overflow_request_tokens = estimate_request_tokens_rough(
-                        api_messages,
-                        tools=agent.tools or None,
+                    _overflow_request_tokens = max(
+                        request_pressure_tokens,
+                        estimate_request_tokens_rough(
+                            api_messages,
+                            tools=agent.tools or None,
+                        ),
                     )
                     (
                         messages,

@@ -102,6 +102,10 @@ def test_input_overflow_relaxes_protected_tail_before_forced_compression():
         patch.object(agent, "_cleanup_task_resources"),
         patch.object(agent, "_compress_context", compressed),
         patch(
+            "agent.conversation_loop.anchored_context_tokens",
+            return_value=77_500,
+        ),
+        patch(
             "agent.conversation_loop.relieve_forced_overflow_tail_pressure",
             pressure,
         ),
@@ -117,7 +121,7 @@ def test_input_overflow_relaxes_protected_tail_before_forced_compression():
     assert result["completed"] is True
     pressure.assert_called_once_with(
         ANY,
-        current_tokens=ANY,
+        current_tokens=77_500,
         context_length=65_536,
     )
     compressed.assert_called_once()
