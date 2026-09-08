@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_REASONING_EFFORT,
+  availableReasoningEfforts,
   isReasoningEffort,
   isThinkingEnabled,
   REASONING_EFFORT_VALUES,
@@ -11,6 +12,16 @@ import {
 } from './reasoning-effort'
 
 describe('reasoning-effort', () => {
+  it('offers only the enforced endpoint levels and displays legacy selections consistently', () => {
+    const levels = ['low', 'medium', 'xhigh']
+    expect(availableReasoningEfforts(levels)).toEqual(levels)
+    expect(resolveReasoningEffort('max', 'medium', levels)).toBe('xhigh')
+    expect(resolveReasoningEffort('ultra', 'medium', levels)).toBe('xhigh')
+    expect(resolveReasoningEffort('high', 'medium', levels)).toBe('medium')
+    expect(resolveReasoningEffort('', 'medium', levels)).toBe('medium')
+    expect(availableReasoningEfforts()).toEqual(REASONING_EFFORTS)
+    expect(resolveReasoningEffort('max')).toBe('max')
+  })
   it('keeps the scale ascending and `none` off it', () => {
     expect(REASONING_EFFORTS).not.toContain('none')
     expect(REASONING_EFFORT_VALUES[0]).toBe('none')

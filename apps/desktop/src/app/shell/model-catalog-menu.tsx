@@ -583,6 +583,7 @@ export function ModelCatalogMenu({
                         </DropdownMenuSubTrigger>
                         <ModelEditSubmenu
                           canDisableReasoning={caps?.can_disable_reasoning}
+                          reasoningEfforts={caps?.reasoning_efforts}
                           defaultEffort={defaultEffort}
                           effort={effEffort}
                           fastControl={fastControl}

@@ -209,7 +209,7 @@ class TestSpawnEnvIsolation:
         # And HOME still passes through unchanged
         assert captured["env"].get("HOME") == "/users/alice"
 
-    def test_kanban_worker_adds_only_kanban_writable_root(self, monkeypatch):
+    def test_kanban_worker_adds_only_kanban_writable_root(self, monkeypatch, tmp_path):
         """Codex-runtime Kanban workers need to write board state outside
         their scratch/worktree workspace, but should not fall back to
         danger-full-access. Hermes passes a narrow app-server config override
@@ -263,6 +263,23 @@ class TestSpawnEnvIsolation:
         )
         assert "sandbox_workspace_write.network_access=false" in cmd
         assert all("danger" not in part for part in cmd)
+
+        # Resolve the actual managed MCP config, not a hand-written server-name
+        # fixture: a grant to a phantom server leaves terminal tools hidden.
+        import tomllib
+        from hermes_cli.codex_runtime_plugin_migration import migrate
+        codex_home = tmp_path / "codex"
+        migrate({}, codex_home=codex_home, discover_plugins=False)
+        configured = tomllib.loads((codex_home / "config.toml").read_text())["mcp_servers"]
+        overrides = tomllib.loads("\n".join(cmd[i + 1] for i, value in enumerate(cmd) if value == "-c"))
+        granted = overrides["mcp_servers"]
+        assert set(granted) == set(configured)
+        server = next(iter(configured))
+        assert configured[server]["args"] == ["-m", "agent.transports.hermes_tools_mcp_server"]
+        assert granted[server]["env"]["HERMES_KANBAN_TASK"] == "t_smoke"
+        assert granted[server]["env"]["HERMES_DELEGATED_CHILD_CONTEXT"] == ""
+        assert "HERMES_KANBAN_TASK" not in captured["env"]
+        assert captured["env"]["HERMES_DELEGATED_CHILD_CONTEXT"] == "1"
 
 
 class TestSpawnEnvSecretStripping:
@@ -339,4 +356,3 @@ class TestSpawnEnvSecretStripping:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-codex-needs-this")
         env = self._capture_spawn_env(monkeypatch)
         assert env.get("OPENAI_API_KEY") == "sk-codex-needs-this"
-

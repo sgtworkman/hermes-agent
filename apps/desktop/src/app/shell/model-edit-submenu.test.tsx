@@ -24,6 +24,8 @@ afterEach(() => {
 
 // Render the submenu inside an open menu/sub so its content (switches) mounts.
 function renderSubmenu(opts: {
+  reasoningEfforts?: string[]
+  canDisableReasoning?: boolean
   defaultEffort?: string
   effort?: string
   fastControl: FastControl
@@ -38,6 +40,8 @@ function renderSubmenu(opts: {
         <DropdownMenuSub open>
           <DropdownMenuSubTrigger>edit</DropdownMenuSubTrigger>
           <ModelEditSubmenu
+            reasoningEfforts={opts.reasoningEfforts}
+            canDisableReasoning={opts.canDisableReasoning}
             defaultEffort={opts.defaultEffort ?? 'medium'}
             effort={opts.effort ?? 'medium'}
             fastControl={opts.fastControl}
@@ -60,6 +64,17 @@ function renderSubmenu(opts: {
 // ever writes directly again, picking an effort for a kanban card would reach
 // over and change the user's live chat.
 describe('ModelEditSubmenu reports edits without performing them', () => {
+  it('renders only enforced endpoint levels and maps a legacy Max selection', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({fastControl: {kind: 'none'}, onSetOptions, reasoning: true,
+      effort: 'max', reasoningEfforts: ['low', 'medium', 'xhigh'], canDisableReasoning: false})
+    const rows = screen.getAllByRole('menuitemradio')
+    expect(rows.map(row => row.textContent)).toEqual(['Low', 'Medium', 'Extra High'])
+    expect(rows[2].getAttribute('aria-checked')).toBe('true')
+    expect(screen.queryByRole('switch')).toBeNull()
+    fireEvent.click(rows[0])
+    expect(onSetOptions).toHaveBeenCalledWith({effort: 'low'})
+  })
   it('param fast: reports the toggle', () => {
     const onSetOptions = vi.fn()
     renderSubmenu({ fastControl: { kind: 'param', on: true }, onSetOptions, reasoning: false })

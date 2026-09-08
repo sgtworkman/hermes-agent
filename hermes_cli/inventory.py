@@ -140,7 +140,7 @@ def build_models_payload(
     if pricing:
         _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier, cached_only=pricing_cache_only)
     if capabilities:
-        _apply_capabilities(rows)
+        _apply_capabilities(rows, custom_providers=ctx.custom_providers)
     if featured:
         _apply_featured(rows)
     _apply_custom_aliases(rows)
@@ -269,12 +269,13 @@ def _reasoning_catalog_reader(slug: str):
     return read
 
 
-def _apply_capabilities(rows: list[dict]) -> None:
+def _apply_capabilities(rows: list[dict], *, custom_providers=None) -> None:
     """Attach ``{model: {fast, reasoning, ...}}`` per row. ``reasoning`` defaults True when the catalog is
     silent (the dial is a no-op on models that ignore it; hiding it from a capable model is worse). A
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
     is deliberately NOT forwarded — it under-reports levels that work."""
     from hermes_cli.models import model_supports_fast_mode
+    from hermes_cli.config_providers import get_custom_provider_reasoning_efforts
 
     try:
         from agent.models_dev import get_model_capabilities
@@ -310,6 +311,13 @@ def _apply_capabilities(rows: list[dict]) -> None:
                 elif detail:
                     entry["can_disable_reasoning"] = not detail.get("mandatory")
 
+            efforts = get_custom_provider_reasoning_efforts(
+                model, row.get("api_url") or "", custom_providers=custom_providers,
+            )
+            if efforts:
+                entry["reasoning_efforts"] = efforts
+                entry["reasoning"] = any(level != "none" for level in efforts)
+                entry["can_disable_reasoning"] = "none" in efforts
             caps[model] = entry
 
         row["capabilities"] = caps

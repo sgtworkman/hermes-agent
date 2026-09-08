@@ -286,6 +286,14 @@ def _base_kwargs(model: str, sanitized: list, tools: Any, params: dict, profile:
 
 def _finish_kwargs(api_kwargs: dict[str, Any], sanitized: list, params: dict, *, supports_prompt_cache_key: bool) -> dict[str, Any]:
     """Tail shared by both build paths: content-addressed prompt_cache_key, then return."""
+    from hermes_cli.config_providers import get_custom_provider_reasoning_efforts
+    efforts = get_custom_provider_reasoning_efforts(api_kwargs.get("model"), params.get("base_url"))
+    if efforts:
+        # Apply after overrides as saved sessions and custom-provider extras
+        # can carry levels the selected endpoint rejects.
+        for container in (api_kwargs, api_kwargs.get("extra_body")):
+            if isinstance(container, dict) and "reasoning_effort" in container:
+                container["reasoning_effort"] = clamp_effort(container["reasoning_effort"], efforts)
     _add_prompt_cache_key(
         api_kwargs, messages=sanitized, tools=api_kwargs.get("tools"), supports_prompt_cache_key=supports_prompt_cache_key,
         session_id=params.get("session_id"), cache_scope_id=params.get("cache_scope_id"),

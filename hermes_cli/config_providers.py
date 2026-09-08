@@ -540,6 +540,33 @@ def get_custom_provider_model_capability(
     return None
 
 
+def get_custom_provider_reasoning_efforts(
+    model: str, base_url: str, custom_providers=None, config=None,
+) -> Optional[list[str]]:
+    """Explicit wire vocabulary bound to an exact configured model and route.
+
+    Unlike aggregator catalog hints, this is the endpoint owner's enforced
+    contract. Unknown routes retain their existing provider behavior.
+    """
+    from agent.reasoning_effort import EFFORT_LADDER
+    from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
+    if not model or not base_url:
+        return None
+    if custom_providers is None:
+        if config is None:
+            config = load_config_readonly()
+        custom_providers = get_compatible_custom_providers(config)
+    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config):
+        values = model_cfg.get("reasoning_efforts")
+        if values is None:
+            continue
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(v, str) or v not in EFFORT_LADDER for v in values)):
+            raise ValueError("reasoning_efforts must be a nonempty list of recognized levels")
+        return [level for level in EFFORT_LADDER if level in values]
+    return None
+
+
 def is_provider_enabled(provider_cfg: Optional[Dict[str, Any]]) -> bool:
     """Whether a ``providers.<name>`` block is enabled: default True; only an explicit
     ``enabled: false`` hides it from the picker, ``/models``, runtime resolver and doctor."""

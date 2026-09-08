@@ -43,12 +43,20 @@ export const isThinkingEnabled = (effort: string, fallback: string = DEFAULT_REA
 
 /** The level a scale control should show. Empty inherits `fallback`; `none`
  *  (thinking off) selects nothing; anything unrecognized clamps to the default. */
-export function resolveReasoningEffort(effort: string, fallback: string = DEFAULT_REASONING_EFFORT): string {
+export function availableReasoningEfforts(supported?: readonly string[]): readonly ReasoningEffort[] {
+  return supported?.length ? REASONING_EFFORTS.filter(level => supported.includes(level)) : REASONING_EFFORTS
+}
+
+export function resolveReasoningEffort(effort: string, fallback: string = DEFAULT_REASONING_EFFORT, supported?: readonly string[]): string {
   const value = normalize(effort || fallback)
 
   if (value === 'none') {
     return ''
   }
 
-  return isReasoningEffort(value) ? value : DEFAULT_REASONING_EFFORT
+  const requested = isReasoningEffort(value) ? value : DEFAULT_REASONING_EFFORT
+  const levels = availableReasoningEfforts(supported)
+  if (levels.includes(requested)) return requested
+  const weaker = levels.filter(level => REASONING_EFFORTS.indexOf(level) < REASONING_EFFORTS.indexOf(requested))
+  return weaker.at(-1) ?? levels[0] ?? ''
 }
