@@ -80,10 +80,34 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
     """Workers must end with kanban_complete / kanban_block; a narrated stop is recorded
     as protocol_violation, so nudge once or twice first."""
     try:
-        from agent.kanban_stop import build_kanban_stop_nudge
+        from agent.kanban_stop import build_kanban_stop_nudge, kanban_stop_nudge_enabled
+
+        if not kanban_stop_nudge_enabled():
+            return None
+        task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        run_status = None
+        try:
+            import sqlite3
+            from contextlib import closing
+            from hermes_cli import kanban_db as kb
+            from hermes_cli.sqlite_safe_read import connect_tracked
+
+            raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+            run_id = int(raw_run_id) if raw_run_id else None
+            path = kb.kanban_db_path().resolve()
+            # Readback must not create, migrate or repair the board on failure.
+            with closing(connect_tracked(
+                path.as_uri() + "?mode=ro", tracking_path=path,
+                uri=True, timeout=1.0,
+            )) as conn:
+                conn.row_factory = sqlite3.Row
+                run_status = kb.goal_run_status(conn, task_id, run_id)
+        except Exception:
+            logger.debug("kanban stop run readback failed", exc_info=True)
 
         return build_kanban_stop_nudge(
-            messages=messages, attempts=getattr(agent, "_kanban_stop_nudges", 0)
+            messages=messages, attempts=getattr(agent, "_kanban_stop_nudges", 0),
+            task_id=task_id, run_status=run_status, require_run_status=True,
         )
     except Exception:
         logger.debug("kanban stop-loop check failed", exc_info=True)

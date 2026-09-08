@@ -78,6 +78,18 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
 
 
 
+def test_missing_run_readback_cannot_hide_failed_terminal_call(clear_kanban_env, tmp_path):
+    from types import SimpleNamespace
+    from agent.turn_stop_gates import _kanban_stop_nudge
+    missing = tmp_path / "absent.db"
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_missing")
+    clear_kanban_env.setenv("HERMES_KANBAN_RUN_ID", "12")
+    clear_kanban_env.setenv("HERMES_KANBAN_DB", str(missing))
+    messages = [{"role": "assistant", "tool_calls": [{"function": {"name": "kanban_complete"}}]}]
+    assert _kanban_stop_nudge(SimpleNamespace(), messages) is not None
+    assert not missing.exists()
+
+
 # ── Integration: agent nudge + dispatcher bounded retry ──────────────
 # These tests verify the two layers compose correctly: the agent-side
 # nudge fires first (up to 2 attempts), and if the worker still exits

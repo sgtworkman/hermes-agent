@@ -50,13 +50,20 @@ def build_kanban_stop_nudge(
     attempts: int = 0,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     task_id: Optional[str] = None,
+    run_status: Optional[str] = None,
+    require_run_status: bool = False,
 ) -> Optional[str]:
     """Synthetic follow-up when a kanban worker exits without a terminal tool; ``None`` when
-    the guard should not fire (not a kanban worker, already completed/blocked, budget exhausted)."""
+    the guard should not fire (not a kanban worker, already handed off, budget exhausted).
+
+    Runtime callers require board readback: a terminal tool attempt is not proof
+    of a transition. Transcript-only callers retain the legacy fallback.
+    """
     if (
         not kanban_stop_nudge_enabled()
         or attempts >= max_attempts
-        or session_called_kanban_terminal(messages)
+        or run_status in {"done", "blocked", "review", "changes_requested", "superseded", "triage"}
+        or (not require_run_status and run_status is None and session_called_kanban_terminal(messages))
     ):
         return None
 
