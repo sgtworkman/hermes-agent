@@ -505,10 +505,17 @@ def test_crashed_and_timed_out_review_runs_retry_in_review_phase(
     assert crashed.status == "review"
 
 
-def test_goal_run_status_is_bound_to_original_run(conn) -> None:
+def test_goal_run_status_is_bound_to_original_run(conn, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from agent.turn_stop_gates import _kanban_stop_nudge
+    database = conn.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.setenv("HERMES_KANBAN_DB", database)
     task_id = kb.create_task(conn, title="Goal handoff race", assignee="builder")
     implementation = kb.claim_task(conn, task_id)
     assert implementation is not None
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(implementation.current_run_id))
+    assert _kanban_stop_nudge(SimpleNamespace(), []) is not None
     assert kb.request_review(
         conn,
         task_id,
@@ -521,6 +528,9 @@ def test_goal_run_status_is_bound_to_original_run(conn) -> None:
     assert kb.goal_run_status(
         conn, task_id, implementation.current_run_id
     ) == "review"
+    assert _kanban_stop_nudge(SimpleNamespace(), []) is None
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review.current_run_id))
+    assert _kanban_stop_nudge(SimpleNamespace(), []) is not None
 
     assert kb.request_changes(
         conn,
@@ -536,6 +546,10 @@ def test_goal_run_status_is_bound_to_original_run(conn) -> None:
     assert kb.goal_run_status(
         conn, task_id, successor.current_run_id
     ) == "running"
+    assert _kanban_stop_nudge(SimpleNamespace(), []) is None
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(successor.current_run_id))
+    failed_attempt = [{"role": "assistant", "tool_calls": [{"function": {"name": "kanban_complete"}}]}]
+    assert _kanban_stop_nudge(SimpleNamespace(), failed_attempt) is not None
     assert not kb.block_task(
         conn,
         task_id,

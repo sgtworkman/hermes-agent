@@ -74,6 +74,18 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
     assert build_kanban_stop_nudge(messages=messages) is None
 
 
+def test_missing_run_readback_cannot_hide_failed_terminal_call(clear_kanban_env, tmp_path):
+    from types import SimpleNamespace
+    from agent.turn_stop_gates import _kanban_stop_nudge
+    missing = tmp_path / "absent.db"
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_missing")
+    clear_kanban_env.setenv("HERMES_KANBAN_RUN_ID", "12")
+    clear_kanban_env.setenv("HERMES_KANBAN_DB", str(missing))
+    messages = [{"role": "assistant", "tool_calls": [{"function": {"name": "kanban_complete"}}]}]
+    assert _kanban_stop_nudge(SimpleNamespace(), messages) is not None
+    assert not missing.exists()
+
+
 
 
 
@@ -84,7 +96,6 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
 # without a terminal call, the dispatcher's bounded retry (streak of 3)
 # handles it.  See also tests/hermes_cli/test_kanban_core_functionality.py
 # for the dispatcher-side streak tests.
-
 
 
 

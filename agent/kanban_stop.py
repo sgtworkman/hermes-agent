@@ -50,13 +50,15 @@ def build_kanban_stop_nudge(
     attempts: int = 0,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     task_id: Optional[str] = None,
+    worker_status: Optional[str] = None,
 ) -> Optional[str]:
     """Synthetic follow-up when a kanban worker exits without a terminal tool; ``None`` when
     the guard should not fire (not a kanban worker, already completed/blocked, budget exhausted)."""
     if (
         not kanban_stop_nudge_enabled()
         or attempts >= max_attempts
-        or session_called_kanban_terminal(messages)
+        or worker_status in {"done", "blocked", "review", "changes_requested", "superseded"}
+        or (worker_status is None and session_called_kanban_terminal(messages))
     ):
         return None
 

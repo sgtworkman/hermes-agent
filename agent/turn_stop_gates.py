@@ -82,8 +82,32 @@ def _kanban_stop_nudge(agent, messages) -> Optional[str]:
     try:
         from agent.kanban_stop import build_kanban_stop_nudge
 
+        worker_status = None
+        task_id = os.environ.get("HERMES_KANBAN_TASK")
+        run_id = os.environ.get("HERMES_KANBAN_RUN_ID")
+        if task_id and run_id:
+            worker_status = "unavailable"
+            try:
+                from contextlib import closing
+                import sqlite3
+                from hermes_cli import kanban_db
+                from hermes_cli.sqlite_safe_read import connect_tracked
+
+                expected_run = int(run_id)
+                if expected_run > 0:
+                    path = kanban_db.kanban_db_path().resolve()
+                    with closing(connect_tracked(path.as_uri() + "?mode=ro",
+                                                 tracking_path=path, uri=True, timeout=1)) as conn:
+                        conn.row_factory = sqlite3.Row
+                        worker_status = kanban_db.goal_run_status(conn, task_id, expected_run) or "unavailable"
+            except (OSError, ValueError, sqlite3.Error):
+                # Keep the existing bounded nudge on unavailable state. Never
+                # infer a completed run from a failed read or a tool attempt.
+                worker_status = "unavailable"
+                logger.debug("kanban stop-loop run readback unavailable", exc_info=True)
         return build_kanban_stop_nudge(
-            messages=messages, attempts=getattr(agent, "_kanban_stop_nudges", 0)
+            messages=messages, attempts=getattr(agent, "_kanban_stop_nudges", 0),
+            worker_status=worker_status,
         )
     except Exception:
         logger.debug("kanban stop-loop check failed", exc_info=True)
