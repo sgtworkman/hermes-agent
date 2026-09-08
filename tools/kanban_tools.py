@@ -601,7 +601,17 @@ def _handle_block(args: dict, **kw) -> str:
     reason = _redact(
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
+    resume_at = args.get("resume_at")
     with _board(args.get("board")) as (kb, conn):
+        if resume_at is not None:
+            from hermes_cli.kanban_db_schedule import parse_resume_at
+
+            _check(kind is None, "resume_at is a timed handoff; omit block kind")
+            scheduled_for = parse_resume_at(resume_at)
+            ok = kb.schedule_task(conn, tid, reason=reason, scheduled_for=scheduled_for,
+                                  expected_run_id=_worker_run_id(tid))
+            _check(ok, f"could not schedule {tid} (unknown id, stale owner, or non-schedulable state)")
+            return _ok_landed(kb, conn, tid, "scheduled", scheduled_for=scheduled_for)
         _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
         # The goal loop treats ANY blocked status as terminal, so kanban_block

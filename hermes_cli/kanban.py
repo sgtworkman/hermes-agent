@@ -503,6 +503,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
     print(f"Task {task.id}: {task.title}")
     field("status", task.status)
+    if task.scheduled_for is not None:
+        from datetime import datetime, timezone
+        field("resume at", datetime.fromtimestamp(task.scheduled_for, timezone.utc).isoformat())
     field("assignee", task.assignee or "-")
     if task.tenant:
         field("tenant", task.tenant)
@@ -927,13 +930,16 @@ def _cmd_block(args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_db_schedule import parse_resume_at
+
+    scheduled_for = parse_resume_at(args.at) if getattr(args, "at", None) else None
     reason = _joined_words(args.reason)
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
+            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), scheduled_for=scheduled_for))
         return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
 
 

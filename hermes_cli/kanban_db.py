@@ -698,6 +698,7 @@ class Task:
     max_runtime_seconds: Optional[int] = None
     last_heartbeat_at: Optional[int] = None
     current_run_id: Optional[int] = None
+    scheduled_for: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
     skills: Optional[list] = None            # None = defaults only; [] = explicitly none
@@ -744,7 +745,7 @@ _TASK_REQUIRED_COLUMNS = (
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "scheduled_for",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -1989,7 +1990,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
         "WHERE task_id = ? AND kind IN ("
         "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
-        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited'"
+        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'scheduled', 'schedule_due'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
@@ -2013,8 +2014,11 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
+    from hermes_cli.kanban_db_schedule import wake_due_tasks
+
     promoted = 0
     with write_txn(conn):
+        wake_due_tasks(conn, now=int(time.time()))
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
@@ -2209,6 +2213,7 @@ _RUN_OUTCOME_TERMINAL_STATUS = {
     "changes_requested": "changes_requested",
     "blocked": "blocked",
     "dependency_wait": "blocked",
+    "scheduled": "scheduled",
 }
 
 
@@ -3275,7 +3280,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
         # is a fresh start for the retry budget.
         cur = conn.execute(
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            "UPDATE tasks SET status = ?, current_run_id = NULL, scheduled_for = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
         )
@@ -3533,15 +3538,18 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
+    expected_run_id: Optional[int] = None, scheduled_for: Optional[int] = None,
 ) -> bool:
-    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
-    until ``unblock_task`` re-gates it."""
+    """Park until an optional due time; undated parking needs explicit unblock."""
+    from hermes_cli.kanban_db_schedule import validate_due_time
+
+    scheduled_for = validate_due_time(scheduled_for, now=int(time.time()))
     with write_txn(conn):
-        params: list[Any] = [task_id]
+        params: list[Any] = [scheduled_for, task_id]
         sql = """
             UPDATE tasks
                SET status       = 'scheduled',
+                   scheduled_for = ?,
                    claim_lock   = NULL,
                    claim_expires= NULL,
                    worker_pid   = NULL
@@ -3556,7 +3564,10 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        payload = {"reason": reason}
+        if scheduled_for is not None:
+            payload["scheduled_for"] = scheduled_for
+        _append_event(conn, task_id, "scheduled", payload, run_id=run_id)
         return True
 
 

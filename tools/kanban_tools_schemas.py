@@ -167,7 +167,10 @@ KANBAN_COMPLETE_SCHEMA = _schema(
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
-        "Stop work on this task and route it according to WHY you're stuck. "
+        "Hand off this task according to what must happen next. "
+        "For a dated wait, set resume_at to an ISO timestamp with timezone and omit kind; "
+        "the same card is scheduled and the normal dispatcher wakes it when due, then checks dependencies. "
+        "Otherwise route it according to WHY you're stuck. "
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (you need a human decision/answer), "
@@ -185,6 +188,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "two sentences. Don't paste the whole conversation; the "
                 "human has the board and can ask follow-ups via comments."
         )),
+        "resume_at": _prop("string", "Optional future ISO-8601 timestamp with explicit timezone. Schedules the same task without marking it complete; omit kind."),
         "kind": {
             "type": "string",
             "enum": ["dependency", "needs_input", "capability", "transient"],

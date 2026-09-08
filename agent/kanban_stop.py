@@ -57,7 +57,7 @@ def build_kanban_stop_nudge(
     if (
         not kanban_stop_nudge_enabled()
         or attempts >= max_attempts
-        or worker_status in {"done", "blocked", "review", "changes_requested", "superseded"}
+        or worker_status in {"done", "blocked", "review", "changes_requested", "superseded", "scheduled"}
         or (worker_status is None and session_called_kanban_terminal(messages))
     ):
         return None

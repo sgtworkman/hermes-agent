@@ -804,7 +804,7 @@ hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to
 hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
         [--priority N]
 hermes kanban promote <id>...                          # move todo/blocked tasks to ready (recovery)
-hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
+hermes kanban schedule <id> --at <ISO8601>             # park until this timezone-qualified time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>
 hermes kanban unlink <parent_id> <child_id>
@@ -866,14 +866,24 @@ kanban:
   default_workdir: ~/work/active-project
 ```
 
-### Scheduled task starts (`scheduled_at`)
+### Dated task continuation (`scheduled_for`)
 
-Set `scheduled_at` on a task to delay dispatch until a specific time. The dispatcher skips ready tasks whose `scheduled_at` is in the future and picks them up on the first tick after that timestamp.
+Park an existing card until a future ISO-8601 timestamp with an explicit timezone:
 
 ```bash
-hermes kanban create "nightly backup audit" \
-  --assignee ops --scheduled-at "2026-06-01T03:00:00Z"
+hermes kanban schedule <id> "wait for capacity" --at "2026-09-12T19:17:00Z"
 ```
+
+The stored `scheduled_for` Unix timestamp is visible in `show --json`. The normal
+dispatcher returns the same card to dependency gating on its first tick at or after
+the due time. This does not complete the task or bypass dependencies, dispatch
+limits, or the task's acceptance criteria. A running dispatcher is required.
+`unblock` cancels the stored date and immediately rechecks dependencies. Without
+`--at`, scheduling is manual parking until an explicit unblock.
+
+Workers use the existing `kanban_block(reason="...", resume_at="...Z")` tool,
+omitting `kind`, to hand off a timed wait. The current run ends as `scheduled`;
+goal-mode cards retain their goal and resume in a new owned run when eligible.
 
 ### Respawn guard
 

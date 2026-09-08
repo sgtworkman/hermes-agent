@@ -303,6 +303,7 @@ _SPECS = [
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
+        _arg("--at", help="Resume at an ISO-8601 timestamp with timezone; normal dispatcher rechecks dependencies"),
         _bulk_ids("schedule"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
