@@ -41,42 +41,33 @@ def _active_goal_manager(session: dict):
 
 
 def _plan_goal_compression_recovery(
-    session: dict, result: Any, *, status: str, raw: Any) -> tuple[str | None, str | None]:
-    """Bounded active-goal retry after compression exhaustion: ``(continuation, notice)``.
-    Exhaustion is a failed turn (never judge input, never a spent goal turn); one fresh
-    continuation is allowed, a second exhaustion pauses the goal instead of spinning."""
+    session: dict, result: Any, *, status: str, raw: Any, sid: str = "") -> tuple[str | None, str | None]:
+    """Recover context pressure through the supported compaction path, durably.
+
+    Failed compression is never completion evidence. Explicit interruption wins;
+    repeated unusable turns use the persisted recovery guard across restarts.
+    """
     if not (isinstance(result, dict) and result.get("compression_exhausted")):
         if _is_successful_goal_turn(result, status, raw):
             session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
         return None, None
-    if not str(session.get("session_key") or ""):
+    goal_mgr = _active_goal_manager(session)
+    if goal_mgr is None:
         return None, None
-    if (goal_mgr := _active_goal_manager(session)) is None:
-        session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
+    if status == "interrupted":
+        goal_mgr.pause(reason="user-interrupted")
         return None, None
-    goal_created_at = float(getattr(goal_mgr.state, "created_at", 0.0) or 0.0)
-    goal_text = getattr(goal_mgr.state, "goal", "")
-    recovery_state = session.get(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS)
-    attempts = 0
-    if (
-        isinstance(recovery_state, dict)
-        and recovery_state.get("goal_created_at") == goal_created_at
-        and recovery_state.get("goal") == goal_text):
-        with contextlib.suppress(TypeError, ValueError):
-            attempts = int(recovery_state.get("attempts", 0) or 0)
-    continuation_prompt = goal_mgr.next_continuation_prompt()
-    if attempts < _GOAL_COMPRESSION_RECOVERY_LIMIT and continuation_prompt:
-        session[_GOAL_COMPRESSION_RECOVERY_ATTEMPTS] = {
-            "goal_created_at": goal_created_at, "goal": goal_text, "attempts": attempts + 1}
-        return (
-            continuation_prompt,
-            "Context compression was exhausted. Retrying the active goal once.")
-    goal_mgr.pause(reason="context compression exhausted twice consecutively")
-    # A later explicit /goal resume gets a fresh bounded recovery cycle.
-    session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
-    return None, (
-        "Goal paused after context compression was exhausted twice. "
-        "Run /compress, then /goal resume to continue.")
+    # Change the failed strategy before retrying: use the same commit/lease/key
+    # transfer path as /compress. No history deletion or provider switch.
+    if sid and session.get("agent") and hasattr(session["agent"], "_compress_context"):
+        try:
+            _compress_live("__goal_context_repair__", sid, session,
+                           "Preserve the active goal, successful evidence, failed operation, and next repair.")
+            goal_mgr = _active_goal_manager(session) or goal_mgr
+        except Exception as exc:
+            _hook_failure("goal context repair", exc)
+    decision = goal_mgr.recover_failed_turn("context_compression_exhausted")
+    return decision.get("continuation_prompt"), decision.get("message")
 
 
 def _admit_prompt_turn(
@@ -283,14 +274,18 @@ def _goal_followup_after_turn(
     compression_exhausted = bool(isinstance(result, dict) and result.get("compression_exhausted"))
     try:
         recovery_prompt, recovery_notice = _plan_goal_compression_recovery(
-            session, result, status=status, raw=raw)
+            session, result, status=status, raw=raw, sid=sid)
         if recovery_notice:
             _emit("status.update", sid, {"kind": "goal", "text": recovery_notice})
         goal_followup = recovery_prompt or None
     except Exception as _goal_recovery_exc:
         _hook_failure("goal compression recovery", _goal_recovery_exc)
-    if compression_exhausted or not _is_successful_goal_turn(result, status, raw):
+    if compression_exhausted:
         return goal_followup
+    if status == "interrupted":
+        if (goal_mgr := _active_goal_manager(session)) is not None:
+            goal_mgr.pause(reason="user-interrupted")
+        return None
     try:
         if session.get("session_key") and (goal_mgr := _active_goal_manager(session)) is not None:
             _active_deleg = 0
@@ -302,8 +297,12 @@ def _goal_followup_after_turn(
                 _active_deleg = count_active_delegations(getattr(session.get("agent"), "session_id", None))
             except Exception:
                 _bg_procs = None
-            decision = goal_mgr.evaluate_after_turn(
-                raw, user_initiated=True, background_processes=_bg_procs, active_delegations=_active_deleg)
+            if _is_successful_goal_turn(result, status, raw):
+                decision = goal_mgr.evaluate_after_turn(
+                    raw, user_initiated=True, background_processes=_bg_procs,
+                    active_delegations=_active_deleg)
+            else:
+                decision = goal_mgr.recover_failed_turn("failed_or_empty_response")
             if verdict_msg := decision.get("message") or "":
                 _emit("status.update", sid, {"kind": "goal", "text": verdict_msg})
             if decision.get("should_continue") and (
@@ -453,6 +452,9 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     # The sudo password callback is thread-local: without re-wiring here, sudo prompts
     # fall through to /dev/tty and hang the headless gateway (re-run is a no-op).
     _wire_callbacks(sid)
+    if isinstance(text, str) and session.get("session_key"):
+        from hermes_cli.goals import GoalManager
+        GoalManager(str(session["session_key"])).ensure_requested_task(text)
     if not st.one_turn_restore:
         # Skip the config-model sync while a /model --once override is active: the once-model is
         # intentionally not pinned as a session model_override (it must not persist), so without this guard
@@ -498,6 +500,10 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     if take_speech_interrupted():
         run_message = _prepend_note(run_message, SPEECH_INTERRUPTED_NOTE)
     run_message = _prepend_note(run_message, _pending_reaction_notes(session))
+    if (goal_mgr := _active_goal_manager(session)) is not None:
+        scope = goal_mgr.workspace_instruction()
+        if scope and (not isinstance(run_message, str) or scope not in run_message):
+            run_message = _prepend_note(run_message, scope)
     return prompt, _prepend_note(run_message, _hud_surface_note(session)), cols, streamer
 
 

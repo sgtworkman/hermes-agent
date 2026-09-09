@@ -2187,6 +2187,99 @@ def claim_review_task(
         return get_task(conn, task_id)
 
 
+def goal_continuation_turns(conn: sqlite3.Connection, task_id: str) -> int:
+    """Read reserved turns, including a worker that crashed before checkpointing."""
+    event = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind IN ('continuation_checkpointed', 'goal_turn_started') ORDER BY id DESC LIMIT 1",
+        (task_id,)).fetchone()
+    payload = _json_dict(_row_get(event, "payload"))
+    return int(payload.get("total_turns") or 0)
+
+
+def goal_run_turns(conn: sqlite3.Connection, task_id: str, run_id: int) -> int:
+    event = _latest_event(conn, task_id, "goal_turn_started", run_id)
+    return int(_json_dict(_row_get(event, "payload")).get("run_turns") or 0)
+
+
+def begin_goal_turn(conn: sqlite3.Connection, task_id: str, *, expected_run_id: int) -> bool:
+    """Reserve a turn under the current owner before calling a model.
+
+    Reservations survive process failure. A failed call still consumed its turn;
+    only increasing the explicit limit permits work after that limit is reached.
+    """
+    if expected_run_id is None:
+        return False
+    with write_txn(conn):
+        task = get_task(conn, task_id)
+        if (task is None or not task.goal_mode or task.status != "running"
+                or task.current_run_id != int(expected_run_id)):
+            return False
+        total = goal_continuation_turns(conn, task_id)
+        limit = task.goal_max_turns
+        if limit is not None and limit > 0 and total >= limit:
+            reason = f"Explicit goal turn limit reached ({total}/{limit})."
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, claim_expires = NULL, "
+                "worker_pid = NULL WHERE id = ? AND current_run_id = ?",
+                (task_id, int(expected_run_id)))
+            _end_run(conn, task_id, outcome="resource_limit", summary=reason)
+            _append_event(conn, task_id, "blocked",
+                          {"reason": reason, "kind": "explicit_resource_limit", "total_turns": total},
+                          run_id=expected_run_id)
+            return False
+        _append_event(conn, task_id, "goal_turn_started",
+                      {"total_turns": total + 1,
+                       "run_turns": goal_run_turns(conn, task_id, expected_run_id) + 1},
+                      run_id=expected_run_id)
+        return True
+
+
+def checkpoint_goal_continuation(
+    conn: sqlite3.Connection, task_id: str, *, expected_run_id: int, reason: str,
+    turns_used: int = 1,
+) -> bool:
+    """Release this goal worker back to its owner queue, preserving task and workspace.
+
+    The run fence makes late workers unable to requeue a stopped or replaced task.
+    This is a checkpoint, not a failed attempt or a new task.
+    """
+    if expected_run_id is None:
+        return False
+    if type(turns_used) is not int or turns_used < 1:
+        raise ValueError("turns_used must be a positive integer")
+    with write_txn(conn):
+        task = get_task(conn, task_id)
+        if (task is None or not task.goal_mode or task.status != "running"
+                or task.current_run_id != int(expected_run_id)):
+            return False
+        status = _retry_status_for_run(conn, task_id, expected_run_id)
+        if not _parents_satisfied(conn, task_id):
+            status = "todo"
+        reserved = goal_run_turns(conn, task_id, expected_run_id)
+        total_turns = goal_continuation_turns(conn, task_id) + max(0, turns_used - reserved)
+        limit = task.goal_max_turns
+        held = bool(limit is not None and limit > 0 and total_turns >= limit)
+        if held:
+            status = "blocked"
+            reason = f"Explicit goal turn limit reached ({total_turns}/{limit}). {reason}"
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL WHERE id = ? AND status = 'running' AND current_run_id = ?",
+            (status, task_id, int(expected_run_id)))
+        if cur.rowcount != 1:
+            return False
+        details = {"automatic_resume": not held, "workspace_path": task.workspace_path,
+                   "turns_used": turns_used, "total_turns": total_turns,
+                   "hold_reason": "explicit_resource_limit" if held else None}
+        run_id = _end_run(conn, task_id,
+                          outcome="resource_limit" if held else "continuation_checkpointed",
+                          summary=reason, metadata=details)
+        _append_event(conn, task_id, "continuation_checkpointed",
+                      {"reason": reason, "next_status": status, **details}, run_id=run_id)
+    return True
+
+
 def _retry_status_for_run(
     conn: sqlite3.Connection, task_id: str, run_id: Optional[int] = None,
 ) -> str:

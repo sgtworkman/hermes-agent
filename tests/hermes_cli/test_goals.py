@@ -189,8 +189,8 @@ class TestJudgeParseFailureAutoPause:
         assert transport_failed is True
 
 
-    def test_auto_pause_after_three_consecutive_parse_failures(self, hermes_home):
-        """N=3 consecutive parse failures → auto-pause with config pointer."""
+    def test_repair_checkpoint_after_three_consecutive_parse_failures(self, hermes_home):
+        """An unusable judge yields owned repair work, never successful completion."""
         from hermes_cli import goals
         from hermes_cli.goals import GoalManager, DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES
 
@@ -210,13 +210,12 @@ class TestJudgeParseFailureAutoPause:
             assert mgr.state.consecutive_parse_failures == 2
 
             d3 = mgr.evaluate_after_turn("step 3")
-            assert d3["should_continue"] is False
-            assert d3["status"] == "paused"
+            assert d3["should_continue"] is True
+            assert d3["status"] == "active"
             assert mgr.state.consecutive_parse_failures == 3
-            # Message points at the config surface so the user can fix it.
-            assert "auxiliary" in d3["message"]
-            assert "goal_judge" in d3["message"]
-            assert "config.yaml" in d3["message"]
+            assert d3["verdict"] == "judge_repair_required"
+            assert "Repair" in d3["continuation_prompt"]
+            assert goals.GoalManager("parse-fail-sid-1").state.continuation_pending
 
 
 
@@ -854,10 +853,11 @@ class TestBlockedVerdict:
 
     def test_blocked_verdict_pauses_goal_instead_of_done(self, hermes_home):
         from unittest.mock import patch
-        from hermes_cli.goals import GoalManager
+        from hermes_cli.goals import GoalContract, GoalManager
 
         mgr = GoalManager(session_id="blocked-sid")
-        mgr.set("delete a repository that does not exist")
+        mgr.set("delete a repository that does not exist",
+                contract=GoalContract(stop_when="target repository does not exist"))
         with patch(
             "hermes_cli.goals.judge_goal",
             return_value=("blocked", "the repo does not exist", False, None, False),
@@ -869,7 +869,7 @@ class TestBlockedVerdict:
         assert decision["verdict"] == "blocked"
         assert decision["status"] == "paused"
         assert decision["should_continue"] is False
-        assert "unachievable" in decision["message"].lower()
+        assert "stop condition" in decision["message"].lower()
         assert mgr.state is not None
         assert mgr.state.status == "paused"
-        assert "unachievable" in (mgr.state.paused_reason or "").lower()
+        assert "stop condition" in (mgr.state.paused_reason or "").lower()

@@ -492,6 +492,8 @@ def load_cli_config() -> Dict[str, Any]:
     defaults = managed_scope.apply_managed_overlay(defaults)
 
     _mirror_config_to_env(defaults, _file_has_terminal_config)
+    from tools.terminal_tool import mark_terminal_config_bridged
+    mark_terminal_config_bridged()
 
     return defaults
 
@@ -4017,6 +4019,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     # Goal text = title + body (the acceptance criteria the judge evaluates against).
     with _kbc.connect_closing() as conn:
         task = _kb.get_task(conn, task_id)
+        prior_goal_turns = (_kb.goal_continuation_turns(conn, task_id)
+                            - _kb.goal_run_turns(conn, task_id, worker_run_id))
     if task is None:
         return
 
@@ -4025,6 +4029,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return
 
     def _run_turn(prompt: str) -> str:
+        if not _begin_kanban_goal_turn():
+            return ""
         result = cli.agent.run_conversation(user_message=prompt, conversation_history=cli.conversation_history)
         _sync_cli_session_id_from_agent(cli)
         resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
@@ -4040,10 +4046,17 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    def _checkpoint(reason: str, *, turns_used: int) -> bool:
+        with _kbc.connect_closing() as c:
+            return _kb.checkpoint_goal_continuation(
+                c, task_id, expected_run_id=worker_run_id, reason=reason, turns_used=turns_used)
+
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=_run_turn, task_status_fn=_task_status, block_fn=_block,
-        max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
+        max_turns=max(1, task.goal_max_turns - prior_goal_turns) if task.goal_max_turns else _DEF_TURNS,
+        first_response=first_response or "",
         log=lambda m: logger.info("%s", m),
+        checkpoint_fn=_checkpoint,
     )
 
 
@@ -4053,8 +4066,25 @@ def _sync_cli_session_id_from_agent(cli) -> None:
         cli.session_id = cli.agent.session_id
 
 
+def _begin_kanban_goal_turn() -> bool:
+    """Fence and reserve goal-worker budget before any model call."""
+    if os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1":
+        return True
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    run_id = _int_or(os.environ.get("HERMES_KANBAN_RUN_ID"), None)
+    if not task_id or run_id is None:
+        logger.warning("Goal worker cannot dispatch without a task and current run identity")
+        return False
+    with kbc.connect_closing() as conn:
+        return kb.begin_goal_turn(conn, task_id, expected_run_id=run_id)
+
+
 def _run_quiet_single_query(cli, effective_query):
     """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code."""
+    if not _begin_kanban_goal_turn():
+        print("Goal worker held: current ownership or explicit turn allowance is unavailable.", file=sys.stderr)
+        sys.exit(1)
     try:
         result = cli.agent.run_conversation(user_message=effective_query, conversation_history=cli.conversation_history)
     except KeyboardInterrupt:
@@ -4337,6 +4367,8 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
         global _active_worktree
         _active_worktree = info
         os.environ["TERMINAL_CWD"] = info["path"]
+        from hermes_cli.config import set_terminal_runtime_cwd
+        set_terminal_runtime_cwd(info["path"])
         atexit.register(_cleanup_worktree, info)
         # GC stale worktrees AFTER _setup_worktree so they never race on git's worktree
         # metadata (the new tree is immune: <24h age gate + live pid lock); then repack

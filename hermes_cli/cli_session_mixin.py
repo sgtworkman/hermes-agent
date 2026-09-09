@@ -160,6 +160,8 @@ class CLISessionMixin:
             try:
                 os.chdir(recorded)
                 os.environ["TERMINAL_CWD"] = recorded
+                from hermes_cli.config import set_terminal_runtime_cwd
+                set_terminal_runtime_cwd(recorded)
                 msg = f"↻ Working directory: {recorded}"
             except OSError as e:
                 msg = f"⚠ Could not enter session's working directory {recorded}: {e}"

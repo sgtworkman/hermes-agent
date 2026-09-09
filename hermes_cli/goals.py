@@ -3,7 +3,7 @@
 A goal is a free-form objective that stays active across turns; after each turn an auxiliary-model
 judge decides whether it is satisfied. The continuation prompt is a normal user message appended via
 ``run_conversation`` (no system-prompt mutation or toolset swap — prompt caching stays intact). Judge
-failures are fail-OPEN (``continue``); the turn budget is the backstop.
+failures are fail-OPEN (``continue``); durable continuation and explicit resource limits bound recovery.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,8 +61,9 @@ CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
     "Continue working toward this goal. Take the next concrete step. "
-    "If you believe the goal is complete, state so explicitly and stop. "
-    "If you are blocked and need input from the user, say so clearly and stop."
+    "Verify the requested outcome before claiming completion. "
+    "An owned failure starts diagnosis, repair, and exact retest; preserve what worked and continue. "
+    "Pause only for an explicit user stop/resource limit or an evidenced external authority boundary."
 )
 
 # With a completion contract: the block tells the agent what "done" means, how to prove it, what
@@ -75,8 +77,8 @@ CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "Stay within the stated boundaries and do not violate the constraints. "
     "Before claiming the goal is done, satisfy the Verification criterion and "
     "show the concrete evidence (command output, file contents, test result). "
-    "If you hit the stated stop condition or are otherwise blocked and need "
-    "user input, say so clearly and stop."
+    "Honor an evidenced stated stop condition or explicit user limit. "
+    "Diagnose and repair owned failures, retest, and continue without requiring another approval."
 )
 
 # With /subgoal criteria: surfaced verbatim to the agent and to the judge.
@@ -88,8 +90,8 @@ CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "Continue working toward the goal AND all additional criteria. Take "
     "the next concrete step. If you believe the goal and every "
     "additional criterion are complete, state so explicitly and stop. "
-    "If you are blocked and need input from the user, say so clearly "
-    "and stop."
+    "Repair owned failures and retest without losing successful criteria. "
+    "Pause only for an evidenced external boundary or explicit user stop/resource limit."
 )
 
 # Fed back when a quality gate fails: bounded output is the evidence to repair against (no judge).
@@ -106,7 +108,8 @@ CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE = (
     "```\n\n"
     "Fix the underlying problem so this gate passes, then re-run it to "
     "confirm. Do not declare the goal complete while any gate fails. If the "
-    "gate itself is wrong or cannot pass, say so clearly and stop."
+    "gate itself is defective, repair its authoritative mechanism while preserving the "
+    "requested acceptance criteria; never weaken a correct check to claim success."
 )
 
 JUDGE_SYSTEM_PROMPT = (
@@ -169,6 +172,11 @@ JUDGE_DELEGATIONS_BLOCK_TEMPLATE = (
     "Active delegations: the agent has {count} delegated subagent batch(es) still running; "
     "their results are delivered to it automatically when they finish.\n\n"
 )
+
+# WORKMAN_FALSE_BLOCK_JUDGE_START
+JUDGE_SYSTEM_PROMPT += "\n\n<!-- WORKMAN_FALSE_BLOCK_RULES_START -->\n## Required checks before blocking or asking for repeated approval\n\nThese rules apply to every model, provider, profile, worker and fallback. They\nattach to the execution harness and do not change when the model changes.\n\nBefore declaring a task blocked, identify the exact unmet outcome requirement\nand its necessary next action. Check currently available connectors, APIs,\nCLIs and supported UI paths. A signed-out optional browser is not a blocker\nwhen an authorized API can perform that action. Prove any claimed missing\ncapability with a current read-only probe; never print credentials.\n\nCheck Glen's existing instructions and standing authorization for that exact\naction and scope before asking again. Preserve genuine unapproved T2 actions,\nuser stops and resource limits. If only one action is held, continue other\nindependent authorized work; do not mark the whole mission blocked.\n\nCount consecutive identical no-progress checkpoints, not turns, repeated\nphrases or lifetime occurrences. Verified progress resets that consecutive\ncount to zero. A different failure breaks the sequence. Record the strategy\nchange before counting the three subsequent identical no-progress checkpoints.\nKeep historical recurrence separately; resetting a streak does not erase it.\n\nA scheduled future event or live asynchronous job is a monitored wait with an\nowner and wakeup. It is not missing authority. An observation timeout does\nnot prove the job stopped. Missing final outcome evidence forbids a completion\nclaim; it does not forbid the next authorized implementation or verification.\n\nBefore a terminal blocked transition, record the requirement, next action,\ncurrent capability probes, existing authorization checked, remaining independent\nwork, and the exact external change needed to resume. If that record contradicts\na working authorized path or omits independent work, continue the task and\nrepair the decision. A model's assertion that it is blocked is not proof.\n\nRegression: working MailerLite API plus signed-out browser must continue via\nAPI. Three turns containing verified repairs must not qualify as three\nno-progress checkpoints. A genuine unapproved customer send must remain held\nwithout preventing independent read-only or staging work. These tests must\nexercise the actual stopping path; instruction presence is installation proof\nonly, never proof that all models obeyed it.\n<!-- WORKMAN_FALSE_BLOCK_RULES_END -->\n\nWhen blocker evidence is missing, contradictory, or limited to an optional interface, return CONTINUE and identify the next verification step. Do not certify a global BLOCKED state from the assistant simply saying it is blocked."
+# WORKMAN_FALSE_BLOCK_JUDGE_END
+
 
 # Judge prompt block listing running background processes (WAIT vs CONTINUE, which pid).
 JUDGE_BACKGROUND_BLOCK_TEMPLATE = (
@@ -368,14 +376,17 @@ class GoalGate:
 
 
 def workspace_fingerprint(cwd: Optional[str] = None) -> str:
-    """sha256 of ``git rev-parse HEAD`` + ``git status --porcelain``; "" outside git (never matches,
-    so gates always re-run — a safe fallback)."""
+    """Hash tracked changes and untracked bytes, not just Git's M/?? labels.
+
+    Unreadable or oversized inputs disable the skip optimization; gates then rerun.
+    """
     workdir = cwd or os.getcwd()
     try:
         outputs = []
         for argv, timeout in (
             (["git", "rev-parse", "HEAD"], 10),
             (["git", "status", "--porcelain"], 30),
+            (["git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--"], 30),
         ):
             proc = subprocess.run(
                 argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -384,8 +395,19 @@ def workspace_fingerprint(cwd: Optional[str] = None) -> str:
             if proc.returncode != 0:
                 return ""
             outputs.append(proc.stdout)
-        blob = outputs[0].strip() + "\n" + outputs[1]
-        return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
+        digest = hashlib.sha256("\n".join(outputs).encode("utf-8", "replace"))
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"], capture_output=True,
+            timeout=30, cwd=workdir, stdin=subprocess.DEVNULL, env=noninteractive_git_env())
+        if untracked.returncode:
+            return ""
+        for raw_path in sorted(filter(None, untracked.stdout.split(b"\0"))):
+            path = Path(workdir) / os.fsdecode(raw_path)
+            if path.is_symlink() or path.stat().st_size > 8 * 1024 * 1024:
+                return ""
+            digest.update(raw_path + b"\0")
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
     except Exception:
         return ""
 
@@ -418,6 +440,15 @@ class GoalState:
     goal: str
     status: str = "active"          # active | paused | done | cleared
     turns_used: int = 0
+    total_turns: int = 0
+    max_total_turns: Optional[int] = None  # explicit hard resource limit; max_turns is a batch size
+    continuation_batches: int = 0
+    continuation_pending: bool = False
+    continuation_reason: str = ""
+    recovery_failure: str = ""
+    recovery_streak: int = 0
+    route: Dict[str, str] = field(default_factory=dict)
+    workspace: str = ""
     max_turns: int = DEFAULT_MAX_TURNS
     created_at: float = 0.0
     last_turn_at: float = 0.0
@@ -455,7 +486,10 @@ class GoalState:
     def from_json(cls, raw: str) -> "GoalState":
         data = json.loads(raw)
         raw_subgoals = data.get("subgoals") or []
-        ints = {k: int(data.get(k) or 0) for k in ("turns_used", "consecutive_parse_failures", "consecutive_transport_failures", "waiting_on_delegations")}
+        ints = {k: int(data.get(k) or 0) for k in ("turns_used", "total_turns", "continuation_batches", "recovery_streak", "consecutive_parse_failures", "consecutive_transport_failures", "waiting_on_delegations")}
+        # Legacy persisted goals only had turns_used. Total usage cannot be
+        # lower than the current batch count, including partially migrated rows.
+        ints["total_turns"] = max(ints["total_turns"], ints["turns_used"])
         floats = {k: float(data.get(k) or 0.0) for k in ("created_at", "last_turn_at", "waiting_until", "waiting_since")}
         return cls(
             goal=data.get("goal", ""),
@@ -464,6 +498,12 @@ class GoalState:
             last_verdict=data.get("last_verdict"),
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
+            max_total_turns=(int(data["max_total_turns"]) if data.get("max_total_turns") is not None else None),
+            workspace=str(data.get("workspace") or ""),
+            continuation_pending=bool(data.get("continuation_pending", False)),
+            continuation_reason=str(data.get("continuation_reason") or ""),
+            recovery_failure=str(data.get("recovery_failure") or ""),
+            route={str(k): str(v) for k, v in (data.get("route") or {}).items()},
             subgoals=[str(s).strip() for s in raw_subgoals if str(s).strip()] if isinstance(raw_subgoals, list) else [],
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
@@ -630,18 +670,42 @@ def load_goal(session_id: str) -> Optional[GoalState]:
         return None
 
 
-def save_goal(session_id: str, state: GoalState) -> None:
+def save_goal(session_id: str, state: GoalState, *, require_durable: bool = False) -> None:
     """Persist a goal to SessionDB. No-op if DB unavailable."""
     if not session_id:
+        if require_durable:
+            raise RuntimeError("goal continuation requires a session identity")
         return
     db = _get_session_db()
     if db is None:
         _warn_dropped_write("GoalManager", "goal", session_id)
+        if require_durable:
+            raise RuntimeError("goal continuation persistence unavailable")
         return
     try:
         db.set_meta(_meta_key(session_id), state.to_json())
+        if require_durable and db.get_meta(_meta_key(session_id)) != state.to_json():
+            raise RuntimeError("goal continuation persistence readback mismatch")
     except Exception as exc:
+        if require_durable:
+            raise RuntimeError("goal continuation checkpoint was not persisted") from exc
         logger.debug("GoalManager: set_meta failed: %s", exc)
+
+
+def list_active_goals() -> List[Tuple[str, GoalState]]:
+    """Persisted active goals, for the owning gateway's existing wakeup watcher."""
+    db = _get_session_db()
+    if db is None:
+        return []
+    active = []
+    for key, raw in db.list_meta_prefix("goal:"):
+        try:
+            state = GoalState.from_json(raw)
+            if state.status == "active":
+                active.append((key[len("goal:"):], state))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("Invalid persisted goal omitted from continuation scan")
+    return active
 
 
 def clear_goal(session_id: str) -> None:
@@ -1088,7 +1152,7 @@ class GoalManager:
         s = self._state
         if s is None or s.status == "cleared":
             return "No active goal. Set one with /goal <text>."
-        turns = f"{s.turns_used}/{s.max_turns} turns"
+        turns = f"{s.turns_used}/{s.max_turns} batch turns; {s.total_turns} total"
         sub = f", {len(s.subgoals)} subgoal{'s' if len(s.subgoals) != 1 else ''}" if s.subgoals else ""
         con = ", contract" if self.has_contract() else ""
         gat = f", {len(s.gates)} gate{'s' if len(s.gates) != 1 else ''}" if s.gates else ""
@@ -1129,19 +1193,38 @@ class GoalManager:
     def _pause_state(self, reason: str) -> None:
         self._state.status = "paused"
         self._state.paused_reason = reason
+        self._state.continuation_pending = False
         self._save()
 
     def _pause_decision(self, paused_reason: str, verdict: str, reason: str, message: str) -> Dict[str, Any]:
         self._pause_state(paused_reason)
         return _decision("paused", False, None, verdict, reason, message)
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None) -> GoalState:
+    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None,
+            max_total_turns: Optional[int] = None) -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
+        # Explicit per-goal limits remain hard limits. The configured/default
+        # max_turns controls batch size; goals.max_total_turns is an optional
+        # separate lifetime limit for all new goals in this profile.
+        if max_total_turns is None:
+            if max_turns is not None:
+                max_total_turns = max_turns
+            else:
+                from hermes_cli.config import load_config
+                max_total_turns = (load_config().get("goals") or {}).get("max_total_turns")
+        if max_total_turns is not None and (
+                isinstance(max_total_turns, bool) or not isinstance(max_total_turns, int)
+                or max_total_turns < 1):
+            raise ValueError("max_total_turns must be a positive integer")
+        from agent.runtime_cwd import resolve_agent_cwd
+        workspace = str(resolve_agent_cwd())
         self._state = GoalState(
             goal=goal, status="active", turns_used=0, created_at=time.time(), last_turn_at=0.0,
+            workspace=workspace,
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
+            max_total_turns=int(max_total_turns) if max_total_turns is not None else None,
             contract=contract if contract is not None else GoalContract(),
         )
         return self._save()
@@ -1153,11 +1236,38 @@ class GoalManager:
         self._state.contract = contract or GoalContract()
         return self._save()
 
+    def ensure_requested_task(self, request: str) -> bool:
+        """Bind clear user build/repair instructions, never quoted/tool/system content.
+
+        Call only at a user-request boundary. Report-only questions and existing
+        goals (including paused goals) keep their current semantics and identity.
+        """
+        if self._state is not None and self._state.status not in {"done", "cleared"}:
+            return False
+        if not isinstance(request, str):
+            return False
+        text = request.strip()
+        if not text or text.startswith(("/", "[", "```", ">")):
+            return False
+        if re.search(r"\b(report[ -]only|one[ -]shot|single[ -]shot|non[ -]goal|do not (?:execute|implement|change|fix))\b", text, re.I):
+            return False
+        # Intent belongs to the user's leading instruction, not an arbitrary mention
+        # of 'build' or 'goal' later in a document supplied for analysis.
+        lead = re.sub(r"^(?:(?:ok(?:ay)?|yes)[,.!]?\s+)?(?:please\s+|(?:can|could|would) you\s+|(?:let['’]?s|lets)\s+|I (?:want|need) you to\s+)?", "", text, flags=re.I)
+        if not re.match(r"(?:build|fix|repair|implement|restore|finish|complete|keep working|do not stop)\b", lead, re.I):
+            return False
+        self.set(text)
+        self._state.continuation_pending = True
+        self._state.continuation_reason = "user-requested implementation or repair"
+        save_goal(self.session_id, self._state, require_durable=True)
+        return True
+
     def pause(self, reason: str = "user-paused") -> Optional[GoalState]:
         if not self._state:
             return None
         self._state.status = "paused"
         self._state.paused_reason = reason
+        self._state.continuation_pending = False
         self._state.clear_wait()   # a wait barrier is meaningless once paused
         return self._save()
 
@@ -1294,6 +1404,8 @@ class GoalManager:
                 gate.last_failed_fingerprint = ""
                 continue
 
+            if fingerprint and gate.last_failed_fingerprint and fingerprint != gate.last_failed_fingerprint:
+                gate.attempts = 0
             gate.attempts += 1
             gate.last_failed_fingerprint = fingerprint
             skipped_note = " (workspace unchanged since last failure — not re-run)" if unchanged else ""
@@ -1304,8 +1416,8 @@ class GoalManager:
                     "gate_failed", f"gate exhausted retries: $ {gate.command}",
                     f"⏸ Goal paused — quality gate still failing after "
                     f"{gate.max_retries} retries: $ {gate.command} "
-                    f"(exit {exit_code}). Fix it manually or /goal gate remove it, "
-                    f"then /goal resume.",
+                    f"(exit {exit_code}). Repeated unchanged failures require a different repair "
+                    f"strategy or a verified external resume condition; keep the gate intact.",
                 )
 
             self._save()
@@ -1428,11 +1540,63 @@ class GoalManager:
         return _decision("active", False, None, "wait", reason, f"⏳ Goal parked (judge) — waiting on {tgt}: {reason}")
 
     def _budget_pause(self, state: GoalState, verdict: str, reason: str, note: str = "") -> Dict[str, Any]:
-        return self._pause_decision(
-            f"turn budget exhausted ({state.turns_used}/{state.max_turns})", verdict, reason,
-            f"⏸ Goal paused — {state.turns_used}/{state.max_turns} turns used{note}. "
-            "Use /goal resume to keep going, or /goal clear to stop.",
-        )
+        """A batch limit checkpoints the same goal; it is not a hard resource limit."""
+        state.turns_used = 0
+        state.continuation_batches += 1
+        return self.checkpoint_continuation(
+            f"batch checkpoint{note}: {reason}", verdict=verdict)
+
+    def checkpoint_continuation(self, reason: str, *, verdict: str = "continue") -> Dict[str, Any]:
+        """Persist intent BEFORE callers enqueue; a restart can recover this intent."""
+        state = self._state
+        if state is None or state.status != "active":
+            return _decision(state.status if state else None, False, None, "inactive", reason, "")
+        if state.max_total_turns is not None and state.total_turns >= state.max_total_turns:
+            return self._pause_decision(
+                "explicit resource limit reached", "resource_limit", reason,
+                f"Goal paused at its explicit resource limit ({state.total_turns} turns used).")
+        state.continuation_pending = True
+        state.continuation_reason = reason[:2000]
+        save_goal(self.session_id, state, require_durable=True)
+        prompt = self.next_continuation_prompt()
+        if prompt and reason:
+            prompt += (
+                "\n\nRecovery checkpoint: " + reason[:2000] +
+                "\nPreserve what worked. Diagnose the owned failure, repair within the existing scope, "
+                "rerun the failed operation, and continue. A failed judge or tool is not completion. "
+                "Do not repeat a potentially completed side effect without reconciling its result. "
+                "Respect user stops, explicit resource limits, and genuine approval boundaries."
+            )
+        return _decision("active", True, prompt, verdict, reason,
+                         "↻ Continuing toward goal: checkpointed; executing the next owned action.")
+
+    def acknowledge_continuation(self) -> None:
+        """Called when the owner begins a turn, never merely when enqueue is attempted."""
+        if self._state is not None and self._state.continuation_pending:
+            self._state.continuation_pending = False
+            self._save()
+
+    def recover_failed_turn(self, kind: str) -> Dict[str, Any]:
+        """Retry a turn that produced no usable result; never judge an empty response done.
+
+        The failure class is supplied by the runner, not model prose. Three identical
+        failures without an intervening usable turn or changed workspace escalate.
+        """
+        state = self._state
+        if state is None or state.status != "active":
+            return _decision(state.status if state else None, False, None, "inactive", kind, "")
+        signature = hashlib.sha256((kind + "\n" + workspace_fingerprint()).encode()).hexdigest()
+        state.recovery_streak = state.recovery_streak + 1 if state.recovery_failure == signature else 1
+        state.recovery_failure = signature
+        state.total_turns += 1
+        if state.recovery_streak >= 3:
+            return self._pause_decision(
+                "PROVEN_NO_PROGRESS_ESCALATED: repeated unusable turn: " + kind,
+                "no_progress", kind,
+                "Goal held after three identical unusable turns. Resume when the route or failure mechanism changes.")
+        return self.checkpoint_continuation(
+            f"Unusable turn ({kind}), attempt {state.recovery_streak}. Diagnose the failure before retrying; "
+            "honor rate limits and reconcile any prior side effects.", verdict="repair_required")
 
     def evaluate_after_turn(
         self, last_response: str, *, user_initiated: bool = True,
@@ -1450,7 +1614,17 @@ class GoalManager:
         if self.is_waiting():
             return self._waiting_decision(state)
 
+        if state.max_total_turns is not None and state.total_turns >= state.max_total_turns:
+            return self.checkpoint_continuation("explicit resource limit reached")
+        if not last_response.strip():
+            return self.recover_failed_turn("empty_response")
+
+        state.recovery_streak = 0
+        state.recovery_failure = ""
+
         state.turns_used += 1
+        state.total_turns += 1
+        state.continuation_pending = False
         state.last_turn_at = time.time()
 
         # Gates run BEFORE the judge: a failing gate is deterministic evidence the goal is not done,
@@ -1481,13 +1655,19 @@ class GoalManager:
         # BLOCKED verdict: the judge ruled the goal genuinely cannot be satisfied as stated (impossible, out
         # of scope, needs user input). See #100954.
         if verdict == "blocked":
-            return self._pause_decision(
-                f"judged unachievable: {reason}", "blocked", reason,
-                f"🚫 Goal judged unachievable — paused: {reason} Re-scope with /goal set, or override with /goal resume.",
-            )
+            # A model verdict is a diagnostic lead, not evidence of an external boundary.
+            # Explicit contract stop conditions remain authoritative.
+            if state.contract.stop_when.strip():
+                return self._pause_decision(
+                    f"contract stop condition: {reason}", "blocked", reason,
+                    f"Goal paused for its explicit stop condition: {reason}")
+            return self.checkpoint_continuation(
+                f"Judge reported a possible blocker: {reason}. Establish the actual boundary; "
+                "repair internal causes and advance independent safe work.", verdict="repair_required")
 
         if verdict == "done":
             state.status = "done"
+            state.continuation_pending = False
             self._save()
             return _decision("done", False, None, "done", reason, f"✓ Goal achieved: {reason}")
 
@@ -1495,42 +1675,44 @@ class GoalManager:
         # goal_judge config so a broken judge can't burn the whole turn budget.
         n_tx, n_parse = state.consecutive_transport_failures, state.consecutive_parse_failures
         if n_tx >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
-            return self._pause_decision(
-                f"judge API unreachable {n_tx} turns in a row (check auxiliary.goal_judge provider/key in config.yaml)",
-                "continue", reason,
-                f"⏸ Goal paused — judge API returned errors ({n_tx} turns). Check the goal_judge provider/key in "
-                + _JUDGE_CONFIG_HINT.format(provider="deepseek", model="deepseek-v4-flash"),
-            )
+            return self.checkpoint_continuation(
+                f"Judge transport failed {n_tx} consecutive times. Diagnose its configured route; "
+                "honor cooldowns and use only already-approved alternatives. Completion remains unverified.",
+                verdict="judge_repair_required")
         if n_parse >= DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES:
-            return self._pause_decision(
-                f"judge model returned unparseable output {n_parse} turns in a row", "continue", reason,
-                f"⏸ Goal paused — the judge model ({n_parse} turns) isn't returning the required JSON verdict. "
-                "Route the judge to a stricter model in "
-                + _JUDGE_CONFIG_HINT.format(provider="openrouter", model="google/gemini-3-flash-preview"),
-            )
+            return self.checkpoint_continuation(
+                f"Judge output failed parsing {n_parse} consecutive times. Repair the structured-output "
+                "contract or use an already-approved judge. Do not claim completion.",
+                verdict="judge_repair_required")
 
         if state.turns_used >= state.max_turns:
             return self._budget_pause(state, "continue", reason)
 
-        self._save()
-        return _decision(
-            "active", True, self.next_continuation_prompt(), "continue", reason,
-            f"↻ Continuing toward goal ({state.turns_used}/{state.max_turns}): {reason}",
-        )
+        return self.checkpoint_continuation(reason)
+
+    def workspace_instruction(self) -> str:
+        if self._state is None or not self._state.workspace:
+            return ""
+        return ("Task workspace: " + self._state.workspace +
+                "\nResolve this task's relative paths here. A memory or diagnostic helper's working "
+                "directory does not change task scope. If a target is missing, check this exact "
+                "workspace before searching elsewhere; preserve the user's scope limits.")
 
     def next_continuation_prompt(self) -> Optional[str]:
         s = self._state
         if not s or s.status != "active":
             return None
-        # Contract first (it carries the verification surface); subgoals fold in as extra criteria.
         if s.has_contract():
             contract_block = s.contract.render_block()
             if s.subgoals:
                 contract_block = f"{contract_block}\n{_render_extra_criteria(s.subgoals)}"
-            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
-        if s.subgoals:
-            return CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+            prompt = CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
+        elif s.subgoals:
+            prompt = CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
+        else:
+            prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+        scope = self.workspace_instruction()
+        return prompt + ("\n\n" + scope if scope else "")
 
     def render_contract(self) -> str:
         """Public helper for the /goal show + /goal draft slash commands."""
@@ -1587,6 +1769,7 @@ def run_kanban_goal_loop(
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
     log=None,
+    checkpoint_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
@@ -1612,6 +1795,17 @@ def run_kanban_goal_loop(
     def _result(outcome: str, reason: str) -> Dict[str, Any]:
         return {"outcome": outcome, "turns_used": turns_used, "reason": reason}
 
+    def _checkpoint(reason: str):
+        if checkpoint_fn is None:
+            return None
+        accepted = checkpoint_fn(reason, turns_used=turns_used)
+        if not accepted:
+            return _result("superseded", reason)
+        status = task_status_fn()
+        if status in ("blocked", "triage"):
+            return _result("held_by_owner", reason)
+        return _result("continuation_checkpointed", reason)
+
     max_turns = int(max_turns or DEFAULT_MAX_TURNS)
     if max_turns < 1:
         max_turns = DEFAULT_MAX_TURNS
@@ -1625,7 +1819,7 @@ def run_kanban_goal_loop(
             status = task_status_fn()
         except Exception as exc:
             _log(f"kanban goal loop: status check failed ({exc}); stopping")
-            return _result("stopped", "status check failed")
+            return _checkpoint("status check failed; reconcile owner before continuing") or _result("stopped", "status check failed")
 
         terminal = _KANBAN_TERMINAL_STATUSES.get(status)
         if terminal is not None:
@@ -1637,12 +1831,20 @@ def run_kanban_goal_loop(
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return _result("stopped", f"status={status}")
 
-        verdict, reason, _parse_failed, _wait, _transport_failed = judge_goal(goal_text, last_response)
+        if not last_response.strip():
+            # No usable output is failure evidence, never completion evidence.
+            verdict = "continue"
+            reason = "The worker produced an empty response. Diagnose the failure, preserve prior results, and repair before retrying."
+        else:
+            verdict, reason, _parse_failed, _wait, _transport_failed = judge_goal(goal_text, last_response)
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
 
         if verdict == "blocked":
+            checkpoint = _checkpoint("repair required after reported blocker: " + _truncate(reason, 400))
+            if checkpoint:
+                return checkpoint
             # Unachievable is NOT done: block the card with the judge's reason now instead of
             # re-poking an impossible goal, and never let it land in done.
             # The judge ruled the goal cannot be satisfied at all — this is NOT done (#100954).
@@ -1666,6 +1868,9 @@ def run_kanban_goal_loop(
 
         # Budget check BEFORE spending another turn.
         if turns_used >= max_turns:
+            checkpoint = _checkpoint("batch checkpoint; next owned action: " + _truncate(reason, 300))
+            if checkpoint:
+                return checkpoint
             _log(f"kanban goal loop: task {task_id} exhausted {turns_used}/{max_turns} turns; blocking")
             _block(
                 f"Goal-mode worker exhausted its turn budget "
@@ -1678,7 +1883,7 @@ def run_kanban_goal_loop(
             last_response = run_turn(prompt) or ""
         except Exception as exc:
             _log(f"kanban goal loop: run_turn failed ({exc}); stopping")
-            return _result("stopped", f"run_turn error: {type(exc).__name__}")
+            return _checkpoint("worker turn failed; diagnose and reconcile before retry") or _result("stopped", f"run_turn error: {type(exc).__name__}")
         turns_used += 1
 
 

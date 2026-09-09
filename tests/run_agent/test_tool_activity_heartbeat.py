@@ -214,16 +214,17 @@ def test_heartbeat_stops_when_execute_raises(monkeypatch):
     def _boom(next_args):
         raise RuntimeError("tool exploded")
 
-    with pytest.raises(RuntimeError):
-        te._run_agent_tool_execution_middleware(
-            agent,
-            function_name="terminal",
-            function_args={"command": "true"},
-            effective_task_id="task",
-            tool_call_id="tc1",
-            execute=_boom,
-            display_index=1,
-        )
+    recovered = te._run_agent_tool_execution_middleware(
+        agent,
+        function_name="terminal",
+        function_args={"command": "true"},
+        effective_task_id="task",
+        tool_call_id="tc1",
+        execute=_boom,
+        display_index=1,
+    )
+    assert '"status":"error"' in recovered.result
+    assert "tool exploded" in recovered.result
 
     n = len(touches)
     time.sleep(0.12)  # several heartbeat intervals

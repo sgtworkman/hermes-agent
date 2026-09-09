@@ -212,6 +212,41 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
             mgr.abandon_fire()
 
 
+def _maybe_resume_tui_goal(sid: str, session: dict) -> None:
+    """Recover saved goal dispatch on the existing session-owned idle watcher."""
+    from hermes_cli.goals import GoalManager
+    if (not session.get("session_key") or session.get("_finalized")
+            or session.get("queued_prompt") or session.get("queued_prompts")):
+        return
+    # A Desktop tab can mirror a messaging session. Its persisted route belongs
+    # to that gateway; the viewer must never launch a second mission owner.
+    mgr = GoalManager(str(session["session_key"]))
+    if mgr.state and mgr.state.route:
+        return
+    # The first gateway turn may not have saved its route yet. Its durable
+    # session source still identifies the gateway as the sole owner.
+    db = _get_db()
+    if db is not None and _is_gateway_owned_source(
+            (db.get_session(str(session["session_key"])) or {}).get("source", "")):
+        return
+    if not mgr.is_active() or not mgr.state.continuation_pending or mgr.is_waiting():
+        return
+    if not _notif_claim_turn(session):
+        return
+    try:
+        # Re-read after claiming so a user pause wins over the earlier observation.
+        mgr = GoalManager(str(session["session_key"]))
+        decision = mgr.checkpoint_continuation(mgr.state.continuation_reason if mgr.state else "")
+        if not decision.get("should_continue"):
+            _notif_release_turn(session)
+            return
+        _notif_submit(f"__goal_recovery__{int(time.time() * 1000)}", sid, session,
+                      decision["continuation_prompt"], "goal checkpoint recovery")
+    except Exception:
+        _notif_release_turn(session)
+        raise
+
+
 def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
     """Fire a due /loop wakeup for an idle TUI/Desktop/dashboard session (per-session poller, coarse cadence). Claims
     the session (running=True) before dispatching so a racing user prompt wins; the post-turn hook completes the tick."""
@@ -566,7 +601,9 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
         # as kanban dispatch). An active non-parked /goal owns the idle boundary and defers the loop tick.
         if now - last_loop_poll >= _LOOP_POLL_SECONDS:
             last_loop_poll = now
-            for what, fire in (("loop wakeup", _maybe_fire_tui_loop_tick), ("heartbeat", _maybe_fire_tui_heartbeat_tick)):
+            for what, fire in (("goal checkpoint", _maybe_resume_tui_goal),
+                               ("loop wakeup", _maybe_fire_tui_loop_tick),
+                               ("heartbeat", _maybe_fire_tui_heartbeat_tick)):
                 try:
                     fire(sid, session)
                 except Exception as tick_exc:

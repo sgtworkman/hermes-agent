@@ -380,7 +380,7 @@ def _run_one_file_once(
     file_timeout: float,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    cmd = [sys.executable, "-m", "pytest", "--confcutdir", str(repo_root), str(file), *pytest_args]
 
     # Give this subprocess its own pytest temp root.
     #
@@ -401,6 +401,7 @@ def _run_one_file_once(
     env = os.environ.copy()
     temproot = tempfile.mkdtemp(prefix="hermes-pytest-tmproot-")
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
+    cmd.extend(["-o", f"cache_dir={Path(temproot) / 'pytest-cache'}"])
 
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -623,6 +624,16 @@ def _print_inline_failure(
     print(flush=True)
 
 
+def _duration_cache_path(repo_root: Path) -> Path:
+    """Honor an explicit cache root and keep independent checkouts separate."""
+    cache_root = os.environ.get("XDG_CACHE_HOME")
+    if cache_root:
+        import hashlib
+        identity = hashlib.sha256(str(repo_root.resolve()).encode()).hexdigest()[:20]
+        return Path(cache_root) / "hermes-tests" / identity / _DURATIONS_FILE
+    return repo_root / _DURATIONS_FILE
+
+
 def _load_durations(repo_root: Path) -> dict[str, float]:
     """Read the duration cache from the repo root.
 
@@ -630,7 +641,7 @@ def _load_durations(repo_root: Path) -> dict[str, float]:
     ``tests/tools/test_code_execution.py``) to wall-clock seconds from
     the last run. Missing or corrupt file → empty dict (safe fallback).
     """
-    path = repo_root / _DURATIONS_FILE
+    path = _duration_cache_path(repo_root)
     if not path.is_file():
         return {}
     try:
@@ -655,7 +666,8 @@ def _save_durations(
     for f, t in file_times:
         key = _format_file(f, repo_root)
         data[key] = round(t, 3)
-    path = repo_root / _DURATIONS_FILE
+    path = _duration_cache_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

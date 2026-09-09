@@ -526,6 +526,17 @@ def _resolve_task_host_cwd(config: Dict[str, Any], task_id: Optional[str]) -> Op
 _terminal_config_bridge_attempted = False
 
 
+def mark_terminal_config_bridged() -> None:
+    """A launcher already applied the complete terminal config for this process.
+
+    The CLI also resolves its local workspace. The SDK fallback must not later
+    overwrite that decision with a profile default. Per-turn scopes remain
+    authoritative for multiplexed gateways.
+    """
+    global _terminal_config_bridge_attempted
+    _terminal_config_bridge_attempted = True
+
+
 def _ensure_terminal_env_bridged() -> None:
     """Backfill TERMINAL_* env vars from config.yaml when no launcher did.
 

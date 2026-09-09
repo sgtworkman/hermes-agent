@@ -415,6 +415,22 @@ class CLILoopsMixin:
         except Exception as exc:
             logging.debug("parked-goal resume check failed: %s", exc)
 
+    def _maybe_resume_goal_checkpoint(self) -> None:
+        """Recover a lost queue insertion on the existing idle poll, including restart."""
+        now = time.monotonic()
+        if now - getattr(self, "_last_goal_recovery_poll", 0.0) < 2.0:
+            return
+        self._last_goal_recovery_poll = now
+        if getattr(self, "_agent_running", False) or not self._pending_input.empty():
+            return
+        mgr = self._get_goal_manager()
+        if mgr is None or not mgr.is_active() or mgr.is_waiting():
+            return
+        if mgr.state.continuation_pending:
+            decision = mgr.checkpoint_continuation(mgr.state.continuation_reason)
+            if decision.get("should_continue"):
+                self._pending_input.put(decision["continuation_prompt"])
+
     def _maybe_fire_loop_tick(self) -> None:
         """Idle hook run from process_loop: fire a due /loop wakeup.
 
@@ -423,6 +439,7 @@ class CLILoopsMixin:
         judge-driven continuations own it; the loop defers to the next poll.
         """
         from cli import _DIM, _RST, _cprint
+        self._maybe_resume_goal_checkpoint()
         mgr = self._get_loop_manager()
         if mgr is None or not mgr.is_due():
             return
@@ -558,8 +575,8 @@ class CLILoopsMixin:
         # Empty/whitespace responses are almost always transient failures (API error,
         # empty stream): judging would say "continue" and trip the parse-failure backstop.
         last_response = self._last_assistant_response_text()
-        if not last_response.strip():
-            return
+        # Empty responses are failed work, not a reason to strand an active goal.
+        # GoalManager persists a bounded recovery checkpoint before queue dispatch.
         _active_deleg = 0
         try:
             from hermes_cli.goals import count_active_delegations, gather_background_processes as _gather_bg

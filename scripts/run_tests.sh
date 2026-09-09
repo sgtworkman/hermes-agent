@@ -123,6 +123,15 @@ for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT T
   fi
 done
 
+# Preserve explicit scratch/cache locations without forwarding loader variables
+# or credentials. Restricted verification must not fall back to the checkout.
+TEST_PATH_ENV=()
+for _test_path_var in TMPDIR TMP TEMP XDG_CACHE_HOME PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE; do
+  if [ -n "${!_test_path_var:-}" ]; then
+    TEST_PATH_ENV+=("$_test_path_var=${!_test_path_var}")
+  fi
+done
+
 # ── Test-runner knobs (computed before we drop env) ────────────────────────
 # The runner's own documented environment knobs must survive the hermetic
 # `env -i` below, or they are silent no-ops for anyone invoking this script:
@@ -163,13 +172,16 @@ cd "$REPO_ROOT"
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
 echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+"$PYTHON" -m compileall -q -j 0 -- $(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
+  ${TEST_PATH_ENV[@]+"${TEST_PATH_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
   TZ=UTC \
   LANG=C.UTF-8 \

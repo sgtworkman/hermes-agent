@@ -1487,6 +1487,8 @@ class CLICommandsMixin:
         except OSError as e:
             print(f"  ⚠ Created worktree but could not enter it: {e}")
         os.environ["TERMINAL_CWD"] = wt_info["path"]
+        from hermes_cli.config import set_terminal_runtime_cwd
+        set_terminal_runtime_cwd(wt_info["path"])
         # Same keep-if-unpushed cleanup as `hermes -w`. Only one tree is "active" per process;
         # an earlier one keeps its own atexit registration (explicit info arg).
         _cli._active_worktree = wt_info

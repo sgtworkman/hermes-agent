@@ -91,14 +91,14 @@ class TestReasoningExcludedFromSummarizer:
 
 
 class TestSummaryBudgetEnvelope:
-    def test_no_max_tokens_wire_cap_on_summary_call(self):
-        """The summary budget is PROMPT GUIDANCE only ("Target ~N tokens").
+    def test_no_max_tokens_wire_cap_on_public_summary_call(self):
+        """Public/cloud summary calls retain prompt-only budget guidance.
 
         A wire-level max_tokens cap truncates summaries mid-section on the
         Anthropic Messages / NVIDIA NIM paths (which forward the param), and
         thinking models burn the cap on reasoning before emitting the summary
         body — producing truncated or thinking-only summaries and compaction
-        loops. The call must NOT carry max_tokens.
+        loops. The public/cloud call must NOT carry max_tokens.
         """
         comp = _make(128_000)
         captured = {}
@@ -126,6 +126,44 @@ class TestSummaryBudgetEnvelope:
         m = re.search(r"Target ~(\d+) tokens", prompt)
         assert m, "prompt-level token target guidance missing"
         assert 1_000 <= int(m.group(1)) <= 10_000
+
+    def test_local_summary_uses_prompt_guidance_without_wire_cap(self):
+        """Private routes share the no-truncation summary-call contract."""
+        with patch.object(cc, "get_model_context_length", return_value=128_000):
+            comp = ContextCompressor(
+                model="qwen38-27b-nvfp4-current",
+                provider="custom",
+                base_url="http://100.109.45.83:8892/v1",
+                threshold_percent=0.50,
+                quiet_mode=True,
+                config_context_length=128_000,
+            )
+            _ = comp.context_length
+        captured = {}
+
+        class FakeMsg:
+            content = "## Active Task\nUser asked X"
+
+        class FakeChoice:
+            message = FakeMsg()
+
+        class FakeResp:
+            choices = [FakeChoice()]
+
+        def fake_call_llm(**kw):
+            captured.update(kw)
+            return FakeResp()
+
+        with patch.object(cc, "call_llm", side_effect=fake_call_llm):
+            out = comp._generate_summary([{"role": "user", "content": "hi"}])
+
+        assert out is not None
+        assert "max_tokens" not in captured
+        prompt = captured["messages"][0]["content"]
+        import re
+        match = re.search(r"Target ~(\d+) tokens", prompt)
+        assert match, "prompt-level token target guidance missing"
+        assert 2_000 <= int(match.group(1)) <= 10_000
 
     def test_budget_capped_at_10k_even_on_1m_window(self):
         comp = _make(1_000_000)

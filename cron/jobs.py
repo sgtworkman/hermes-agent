@@ -5,6 +5,7 @@ import contextlib
 import copy
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import shutil
@@ -2158,6 +2159,107 @@ def note_fire_forward_failure(job_id: str, detail: str) -> bool:
     return _with_job(job_id, apply, False)
 
 
+def _read_business_outcome_contract(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read an opted-in scheduler-visible business outcome fail-closed.
+
+    Process success remains authoritative for ordinary jobs.  Jobs carrying a
+    ``business_outcome_contract`` only report ``ok`` when the named JSON state
+    and every configured GREEN requirement match.  The exact source bytes are
+    SHA-bound into the persisted readback so status consumers can audit what
+    the scheduler actually observed.
+    """
+    contract = job.get("business_outcome_contract")
+    if not isinstance(contract, dict):
+        return None
+
+    raw_path = str(contract.get("path") or "").strip()
+    field = str(contract.get("status_field") or "").strip()
+    green_values = {str(value).strip().upper() for value in contract.get("green_values", [])}
+    red_values = {str(value).strip().upper() for value in contract.get("red_values", [])}
+    skip_values = {str(value).strip().upper() for value in contract.get("skip_values", [])}
+    readback: Dict[str, Any] = {
+        "source_path": raw_path or None,
+        "status_field": field or None,
+        "read_at": _hermes_now().isoformat(),
+    }
+    if not raw_path or not field or not green_values:
+        return {
+            **readback,
+            "scheduler_status": "business_unknown",
+            "business_state": "UNKNOWN",
+            "reason": "invalid_business_outcome_contract",
+        }
+
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path(str(job.get("workdir") or HERMES_DIR)).expanduser() / path
+    readback["source_path"] = str(path)
+
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 1024 * 1024:
+            raise ValueError("business outcome file exceeds 1 MiB")
+        payload: Any = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("business outcome JSON must be an object")
+
+        def nested_value(dotted_field: str) -> Any:
+            value: Any = payload
+            for part in dotted_field.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    raise KeyError(dotted_field)
+                value = value[part]
+            return value
+
+        business_state = str(nested_value(field)).strip().upper()
+        readback["source_sha256"] = hashlib.sha256(raw).hexdigest()
+        readback["business_state"] = business_state or "UNKNOWN"
+        if business_state in green_values:
+            requirements = contract.get("green_requirements", [])
+            if not isinstance(requirements, list):
+                raise ValueError("green_requirements must be a list")
+            results = []
+            for requirement in requirements:
+                if not isinstance(requirement, dict):
+                    raise ValueError("green requirement must be an object")
+                requirement_field = str(requirement.get("field") or "").strip()
+                allowed = {
+                    str(item).strip().upper() for item in requirement.get("values", [])
+                }
+                if not requirement_field or not allowed:
+                    raise ValueError("green requirement needs field and values")
+                actual = str(nested_value(requirement_field)).strip().upper()
+                results.append({
+                    "field": requirement_field,
+                    "actual": actual,
+                    "satisfied": actual in allowed,
+                })
+            readback["green_requirements"] = results
+            if all(item["satisfied"] for item in results):
+                readback.update(scheduler_status="ok", reason="business_outcome_green")
+            else:
+                readback.update(
+                    scheduler_status="business_unknown",
+                    reason="green_requirements_not_satisfied",
+                )
+        elif business_state in red_values:
+            readback.update(scheduler_status="business_red", reason="business_outcome_red")
+        elif business_state in skip_values:
+            readback.update(scheduler_status="business_skipped", reason="business_outcome_skipped")
+        else:
+            readback.update(
+                scheduler_status="business_unknown",
+                reason="unrecognized_business_outcome",
+            )
+    except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        readback.update(
+            scheduler_status="business_unknown",
+            business_state="UNKNOWN",
+            reason=type(exc).__name__,
+        )
+    return readback
+
+
 def _record_run_outcome(
     job: Dict[str, Any], success: bool, error: Optional[str], delivery_error: Optional[str],
     status: Optional[str], now: str,
@@ -2168,10 +2270,33 @@ def _record_run_outcome(
     # The transient manual-run context is single-fire: the run that just completed consumed it.
     job.pop("manual_run_prompt", None)
     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
-    job["last_status"] = status or (
+    agent_run_status = status or (
         "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
-    job["last_error"] = None if success else error
-    if success:
+    job["agent_run_status"] = agent_run_status
+    business_readback = _read_business_outcome_contract(job)
+    if agent_run_status != "ok" or business_readback is None:
+        job["last_status"] = agent_run_status
+    else:
+        job["last_status"] = business_readback["scheduler_status"]
+    if business_readback is not None:
+        job["business_outcome_readback"] = business_readback
+    business_failed = (
+        success
+        and agent_run_status == "ok"
+        and business_readback is not None
+        and job["last_status"] != "ok"
+    )
+    effective_success = success and not business_failed
+    if not success:
+        job["last_error"] = error
+    elif business_failed:
+        job["last_error"] = (
+            "business outcome did not satisfy GREEN contract: "
+            f"{business_readback.get('business_state', 'UNKNOWN')}"
+        )
+    else:
+        job["last_error"] = None
+    if effective_success:
         # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
         # the forward-failure stamp so it only describes CURRENT auto-fire health.
         job.pop("preflight_alerted", None)

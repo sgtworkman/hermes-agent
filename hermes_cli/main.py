@@ -1430,6 +1430,8 @@ def _apply_in_dir(args) -> None:
     except OSError as e:
         print(f"Error: cannot enter --in directory {in_dir}: {e}")
         sys.exit(1)
+    from hermes_cli.config import set_terminal_runtime_cwd
+    set_terminal_runtime_cwd(_target_dir)
     args.no_restore_cwd = True
 
 
@@ -1500,6 +1502,8 @@ def _resolve_chat_session_args(args, use_tui: bool) -> None:
                 print(f"⚠ session's recorded dir is gone ({_saved_cwd}); staying in {os.getcwd()}")
             elif _saved_cwd and os.path.realpath(_saved_cwd) != os.path.realpath(os.getcwd()):
                 os.chdir(_saved_cwd)
+                from hermes_cli.config import set_terminal_runtime_cwd
+                set_terminal_runtime_cwd(_saved_cwd)
                 print(f"↪ restored workspace dir: {_saved_cwd}")
 
 

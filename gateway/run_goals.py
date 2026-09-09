@@ -273,6 +273,12 @@ class GatewayGoalsMixin:
         if mgr is None or not mgr.is_active():
             return
 
+        if source is not None:
+            platform = getattr(source, "platform", "")
+            mgr.state.route = {"platform": str(getattr(platform, "value", platform) or "")}
+            for key in ("chat_id", "chat_type", "thread_id", "user_id", "user_name"):
+                mgr.state.route[key] = str(getattr(source, key, "") or "")
+
         _bg_procs, _active_deleg = None, 0
         with suppress(Exception):
             from hermes_cli.goals import count_active_delegations, gather_background_processes as _gather_bg
@@ -318,10 +324,21 @@ class GatewayGoalsMixin:
         except Exception as exc:
             logger.debug("post-turn session resolution failed: %s", exc)
             return
-        # Empty interrupted/errored responses must not drive /goal, but an in-flight /loop tick
-        # still needs to be released and rescheduled.
+        if not is_internal and isinstance(getattr(event, "text", None), str):
+            from hermes_cli.goals import GoalManager
+            await self._warm_goals_session_db("goal task intake")
+            await self._run_in_executor_with_context(
+                lambda: GoalManager(session_entry.session_id).ensure_requested_task(event.text))
+        # An explicit cancellation must stay stopped. Empty/error turns instead enter
+        # GoalManager recovery; silently skipping them strands the persisted goal.
         hooks = [("loop completion", self._post_turn_loop_completion)]
-        if final_text.strip():
+        interrupted = isinstance(agent_result, dict) and (
+            agent_result.get("interrupted") is True or agent_result.get("cancelled") is True)
+        if interrupted:
+            from hermes_cli.goals import GoalManager
+            await self._run_in_executor_with_context(
+                lambda: GoalManager(session_entry.session_id).pause(reason="user-interrupted"))
+        if not interrupted:
             hooks.insert(0, ("goal continuation", self._post_turn_goal_continuation))
         for label, hook in hooks:
             try:
@@ -431,6 +448,31 @@ class GatewayGoalsMixin:
             with suppress(Exception):
                 mgr.abandon_tick()
 
+    async def _goal_wakeup_fire_one(self, sid: str, state: Any) -> None:
+        """Resume a persisted checkpoint through the same session and adapter owner."""
+        from hermes_cli.goals import GoalManager
+        if not state.continuation_pending or not state.route.get("platform"):
+            return
+        source = self._build_process_event_source({"session_key": "", **state.route})
+        if source is None:
+            return
+        key = self._session_key_for_source(source)
+        adapter = self._adapter_for_source(source)
+        if not key or adapter is None or key in self._running_agents:
+            return
+        if key in getattr(adapter, "_active_sessions", {}) or self._queue_depth(key, adapter=adapter):
+            return
+        entry = await self.async_session_store.get_or_create_session(source, touch_activity=False)
+        if entry.session_id != sid:
+            return  # a replaced/new conversation never inherits the old mission
+        mgr = GoalManager(sid)
+        if not mgr.is_active() or mgr.is_waiting() or not mgr.state.continuation_pending:
+            return
+        decision = await self._run_in_executor_with_context(
+            lambda: mgr.checkpoint_continuation(mgr.state.continuation_reason))
+        if decision.get("should_continue"):
+            await adapter.handle_message(self._synthetic_prompt_event(source, decision["continuation_prompt"], internal=True))
+
     async def _loop_wakeup_watcher(self, interval: float = 15.0) -> None:
         """Fire due /loop wakeups for idle gateway sessions: a coarse ticker scans persisted loops
         (SessionDB ``loop:*`` rows) and injects each due prompt via the synthetic-message path.
@@ -447,6 +489,13 @@ class GatewayGoalsMixin:
                 await self._warm_goals_session_db("loop wakeup")
                 # Off-loop too: the read is lock-free under WAL but convoys on the writer lock without it.
                 active_loops = await self._run_in_executor_with_context(list_active_loops)
+                from hermes_cli.goals import list_active_goals
+                active_goals = await self._run_in_executor_with_context(list_active_goals)
+                for sid, state in active_goals:
+                    try:
+                        await self._goal_wakeup_fire_one(sid, state)
+                    except Exception as exc:
+                        logger.warning("goal checkpoint recovery deferred: %s", type(exc).__name__)
                 now = time.time()
                 for sid, state in active_loops:
                     await self._loop_wakeup_fire_one(sid, state, now, warned_no_route)

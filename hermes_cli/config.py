@@ -2070,6 +2070,21 @@ def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
     return (backend or "").strip().lower() == "ssh" and (cwd == "~" or cwd.startswith("~/"))
 
 
+_TERMINAL_RUNTIME_CWD: Dict[str, str] = {}
+
+
+def set_terminal_runtime_cwd(cwd: str) -> None:
+    """Bind an explicit launch workspace to this profile for the process lifetime.
+
+    This is runtime state, not a config write. It survives dotenv/config reloads
+    without changing remote/container backends or another profile's policy.
+    """
+    path = Path(cwd).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError("runtime workspace must be an existing directory")
+    _TERMINAL_RUNTIME_CWD[str(get_hermes_home().resolve())] = str(path)
+
+
 def apply_terminal_config_to_env(
     *, env: Optional[Dict[str, str]] = None, config: Optional[Dict[str, Any]] = None,
     override: Optional[bool] = None) -> Dict[str, str]:
@@ -2097,8 +2112,14 @@ def apply_terminal_config_to_env(
     if not (config is not None or "backend" in raw_terminal_cfg):
         backend_sources = backend_sources[::-1]  # env wins when the file did not set backend
     terminal_backend = str(backend_sources[0] or backend_sources[1] or "")
+    runtime_cwd = _TERMINAL_RUNTIME_CWD.get(str(get_hermes_home().resolve()))
+    runtime_owns_cwd = target is os.environ and terminal_backend.strip().lower() in {"", "local"} and bool(runtime_cwd)
+    if runtime_owns_cwd:
+        target["TERMINAL_CWD"] = runtime_cwd
 
     for cfg_key, env_var in TERMINAL_CONFIG_ENV_MAP.items():
+        if cfg_key == "cwd" and runtime_owns_cwd:
+            continue
         if cfg_key not in terminal_cfg:
             continue
         value = terminal_cfg[cfg_key]
