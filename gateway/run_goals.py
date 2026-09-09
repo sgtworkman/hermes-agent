@@ -324,11 +324,6 @@ class GatewayGoalsMixin:
         except Exception as exc:
             logger.debug("post-turn session resolution failed: %s", exc)
             return
-        if not is_internal and isinstance(getattr(event, "text", None), str):
-            from hermes_cli.goals import GoalManager
-            await self._warm_goals_session_db("goal task intake")
-            await self._run_in_executor_with_context(
-                lambda: GoalManager(session_entry.session_id).ensure_requested_task(event.text))
         # An explicit cancellation must stay stopped. Empty/error turns instead enter
         # GoalManager recovery; silently skipping them strands the persisted goal.
         hooks = [("loop completion", self._post_turn_loop_completion)]

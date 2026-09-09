@@ -313,7 +313,6 @@ class CLIChatTurnMixin:
             if isinstance(message, str):
                 goal_manager = self._get_goal_manager()
                 if goal_manager is not None:
-                    goal_manager.ensure_requested_task(message)
                     if goal_manager.is_active() and (scope := goal_manager.workspace_instruction()):
                         if not isinstance(agent_message, str) or scope not in agent_message:
                             agent_message = _prepend_note_to_message(agent_message, scope)

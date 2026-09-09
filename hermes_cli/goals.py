@@ -61,9 +61,8 @@ CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
     "Continue working toward this goal. Take the next concrete step. "
-    "Verify the requested outcome before claiming completion. "
-    "An owned failure starts diagnosis, repair, and exact retest; preserve what worked and continue. "
-    "Pause only for an explicit user stop/resource limit or an evidenced external authority boundary."
+    "If you believe the goal is complete, state so explicitly and stop. "
+    "If you are blocked and need input from the user, say so clearly and stop."
 )
 
 # With a completion contract: the block tells the agent what "done" means, how to prove it, what
@@ -77,8 +76,8 @@ CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "Stay within the stated boundaries and do not violate the constraints. "
     "Before claiming the goal is done, satisfy the Verification criterion and "
     "show the concrete evidence (command output, file contents, test result). "
-    "Honor an evidenced stated stop condition or explicit user limit. "
-    "Diagnose and repair owned failures, retest, and continue without requiring another approval."
+    "If you hit the stated stop condition or are otherwise blocked and need "
+    "user input, say so clearly and stop."
 )
 
 # With /subgoal criteria: surfaced verbatim to the agent and to the judge.
@@ -90,8 +89,8 @@ CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "Continue working toward the goal AND all additional criteria. Take "
     "the next concrete step. If you believe the goal and every "
     "additional criterion are complete, state so explicitly and stop. "
-    "Repair owned failures and retest without losing successful criteria. "
-    "Pause only for an evidenced external boundary or explicit user stop/resource limit."
+    "If you are blocked and need input from the user, say so clearly "
+    "and stop."
 )
 
 # Fed back when a quality gate fails: bounded output is the evidence to repair against (no judge).
@@ -108,8 +107,7 @@ CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE = (
     "```\n\n"
     "Fix the underlying problem so this gate passes, then re-run it to "
     "confirm. Do not declare the goal complete while any gate fails. If the "
-    "gate itself is defective, repair its authoritative mechanism while preserving the "
-    "requested acceptance criteria; never weaken a correct check to claim success."
+    "gate itself is wrong or cannot pass, say so clearly and stop."
 )
 
 JUDGE_SYSTEM_PROMPT = (
@@ -173,9 +171,7 @@ JUDGE_DELEGATIONS_BLOCK_TEMPLATE = (
     "their results are delivered to it automatically when they finish.\n\n"
 )
 
-# WORKMAN_FALSE_BLOCK_JUDGE_START
-JUDGE_SYSTEM_PROMPT += "\n\n<!-- WORKMAN_FALSE_BLOCK_RULES_START -->\n## Required checks before blocking or asking for repeated approval\n\nThese rules apply to every model, provider, profile, worker and fallback. They\nattach to the execution harness and do not change when the model changes.\n\nBefore declaring a task blocked, identify the exact unmet outcome requirement\nand its necessary next action. Check currently available connectors, APIs,\nCLIs and supported UI paths. A signed-out optional browser is not a blocker\nwhen an authorized API can perform that action. Prove any claimed missing\ncapability with a current read-only probe; never print credentials.\n\nCheck Glen's existing instructions and standing authorization for that exact\naction and scope before asking again. Preserve genuine unapproved T2 actions,\nuser stops and resource limits. If only one action is held, continue other\nindependent authorized work; do not mark the whole mission blocked.\n\nCount consecutive identical no-progress checkpoints, not turns, repeated\nphrases or lifetime occurrences. Verified progress resets that consecutive\ncount to zero. A different failure breaks the sequence. Record the strategy\nchange before counting the three subsequent identical no-progress checkpoints.\nKeep historical recurrence separately; resetting a streak does not erase it.\n\nA scheduled future event or live asynchronous job is a monitored wait with an\nowner and wakeup. It is not missing authority. An observation timeout does\nnot prove the job stopped. Missing final outcome evidence forbids a completion\nclaim; it does not forbid the next authorized implementation or verification.\n\nBefore a terminal blocked transition, record the requirement, next action,\ncurrent capability probes, existing authorization checked, remaining independent\nwork, and the exact external change needed to resume. If that record contradicts\na working authorized path or omits independent work, continue the task and\nrepair the decision. A model's assertion that it is blocked is not proof.\n\nRegression: working MailerLite API plus signed-out browser must continue via\nAPI. Three turns containing verified repairs must not qualify as three\nno-progress checkpoints. A genuine unapproved customer send must remain held\nwithout preventing independent read-only or staging work. These tests must\nexercise the actual stopping path; instruction presence is installation proof\nonly, never proof that all models obeyed it.\n<!-- WORKMAN_FALSE_BLOCK_RULES_END -->\n\nWhen blocker evidence is missing, contradictory, or limited to an optional interface, return CONTINUE and identify the next verification step. Do not certify a global BLOCKED state from the assistant simply saying it is blocked."
-# WORKMAN_FALSE_BLOCK_JUDGE_END
+
 
 
 # Judge prompt block listing running background processes (WAIT vs CONTINUE, which pid).
@@ -1235,32 +1231,6 @@ class GoalManager:
             return None
         self._state.contract = contract or GoalContract()
         return self._save()
-
-    def ensure_requested_task(self, request: str) -> bool:
-        """Bind clear user build/repair instructions, never quoted/tool/system content.
-
-        Call only at a user-request boundary. Report-only questions and existing
-        goals (including paused goals) keep their current semantics and identity.
-        """
-        if self._state is not None and self._state.status not in {"done", "cleared"}:
-            return False
-        if not isinstance(request, str):
-            return False
-        text = request.strip()
-        if not text or text.startswith(("/", "[", "```", ">")):
-            return False
-        if re.search(r"\b(report[ -]only|one[ -]shot|single[ -]shot|non[ -]goal|do not (?:execute|implement|change|fix))\b", text, re.I):
-            return False
-        # Intent belongs to the user's leading instruction, not an arbitrary mention
-        # of 'build' or 'goal' later in a document supplied for analysis.
-        lead = re.sub(r"^(?:(?:ok(?:ay)?|yes)[,.!]?\s+)?(?:please\s+|(?:can|could|would) you\s+|(?:let['’]?s|lets)\s+|I (?:want|need) you to\s+)?", "", text, flags=re.I)
-        if not re.match(r"(?:build|fix|repair|implement|restore|finish|complete|keep working|do not stop)\b", lead, re.I):
-            return False
-        self.set(text)
-        self._state.continuation_pending = True
-        self._state.continuation_reason = "user-requested implementation or repair"
-        save_goal(self.session_id, self._state, require_durable=True)
-        return True
 
     def pause(self, reason: str = "user-paused") -> Optional[GoalState]:
         if not self._state:

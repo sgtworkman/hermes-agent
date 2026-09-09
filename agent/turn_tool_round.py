@@ -175,17 +175,6 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
-    # Native completion/block/review is an owner handoff, not an invitation to
-    # generate another model turn or run post-completion verification tools.
-    from agent.kanban_stop import native_worker_stop_status
-    owner_status = native_worker_stop_status()
-    if owner_status is not None:
-        _turn_exit_reason = "native_worker_handoff"
-        final_response = f"Native task run ended with status: {owner_status}. See the task receipt for its summary and evidence."
-        append_message(messages, {"role": "assistant", "content": final_response})
-        agent._session_messages = messages
-        return _verdict("break")
-
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real

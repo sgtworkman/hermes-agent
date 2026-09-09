@@ -452,9 +452,6 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     # The sudo password callback is thread-local: without re-wiring here, sudo prompts
     # fall through to /dev/tty and hang the headless gateway (re-run is a no-op).
     _wire_callbacks(sid)
-    if isinstance(text, str) and session.get("session_key"):
-        from hermes_cli.goals import GoalManager
-        GoalManager(str(session["session_key"])).ensure_requested_task(text)
     if not st.one_turn_restore:
         # Skip the config-model sync while a /model --once override is active: the once-model is
         # intentionally not pinned as a session model_override (it must not persist), so without this guard

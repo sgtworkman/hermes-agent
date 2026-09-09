@@ -7,7 +7,6 @@ staleness state).
 """
 
 import base64
-import contextvars
 import errno
 import json
 import logging
@@ -39,67 +38,6 @@ from tools.file_tools_read_tracking import (
     _task_data, _update_read_timestamp)
 
 logger = logging.getLogger(__name__)
-
-
-# /review snapshot guard. The delegate runtime sets this only on reviewer
-# turns; ordinary agents retain their existing path behavior. A ContextVar
-# keeps concurrent subagents isolated without a process-global mutable flag.
-#
-# Re-ported 2026-09-04 after upstream d3630f85 ("whole-codebase simplification")
-# rewrote this file and dropped the local /review rail. The runtime gate it
-# pairs with (set_thread_tool_whitelist in hermes_cli/plugins.py) survived that
-# refactor, so only this half needed restoring.
-_REVIEW_SNAPSHOT_ROOT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "hermes_review_snapshot_root", default=None
-)
-
-
-def set_review_snapshot_root(root: str | None) -> None:
-    """Restrict reviewer file reads/searches to an immutable snapshot root."""
-    _REVIEW_SNAPSHOT_ROOT.set(str(root) if root else None)
-
-
-def clear_review_snapshot_root() -> None:
-    """Clear the current reviewer snapshot restriction."""
-    _REVIEW_SNAPSHOT_ROOT.set(None)
-
-
-def review_snapshot_path_error(path: str) -> str | None:
-    """Validate a local reviewer path against the active snapshot root.
-
-    Remote URLs and data URLs are not local builder evidence and are left to
-    their normal network/provider policy.
-    """
-    root = _REVIEW_SNAPSHOT_ROOT.get()
-    if not root or not isinstance(path, str):
-        return None
-    if path.startswith(("http://", "https://", "data:")):
-        return None
-    candidate = path[7:] if path.startswith("file://") else path
-    try:
-        resolved = Path(candidate).expanduser().resolve()
-    except (OSError, RuntimeError):
-        return (
-            "Independent review is restricted to its immutable snapshot; "
-            f"refusing live-path read/search of {path!r}."
-        )
-    return _review_snapshot_path_error(path, resolved)
-
-
-def _review_snapshot_path_error(path: str, resolved) -> str | None:
-    root = _REVIEW_SNAPSHOT_ROOT.get()
-    if not root:
-        return None
-    try:
-        root_path = Path(root).expanduser().resolve()
-        resolved_path = Path(resolved).expanduser().resolve()
-        resolved_path.relative_to(root_path)
-    except (OSError, RuntimeError, ValueError):
-        return (
-            "Independent review is restricted to its immutable snapshot; "
-            f"refusing live-path read/search of {path!r}."
-        )
-    return None
 
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
@@ -602,20 +540,12 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
 def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers.
 
-    Guard order: /review snapshot confinement (no I/O) → device-path blocklist
-    (no I/O) → stat-based special-file guard (host only) → document extraction
-    → binary-extension guard → Hermes internal denylist → negative-result cache
-    → dedup stub → real read.
+    Guard order: device-path blocklist (no I/O) → stat-based special-file
+    guard (host only) → document extraction → binary-extension guard → Hermes
+    internal denylist → negative-result cache → dedup stub → real read.
     """
     try:
         offset, limit = normalize_read_pagination(offset, limit)
-
-        # First, and before any I/O: a reviewer may only read its frozen
-        # snapshot. Reading the live tree would let an audit see builder state
-        # that is not in the evidence packet it is supposed to be judging.
-        _review_path_error = review_snapshot_path_error(path)
-        if _review_path_error:
-            return tool_error(_review_path_error)
 
         device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(task_id)
         if _is_blocked_device(path, base_dir=device_base):
@@ -1004,13 +934,6 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
-
-        # Same confinement as read_file_tool: a reviewer searching the live
-        # tree would defeat the frozen-snapshot guarantee just as surely as
-        # reading it directly.
-        _review_path_error = review_snapshot_path_error(path)
-        if _review_path_error:
-            return tool_error(_review_path_error)
 
         # Pagination args (and order) are part of the key so paging through truncated
         # results doesn't trip the repeated-search guard.

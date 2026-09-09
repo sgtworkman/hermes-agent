@@ -54,23 +54,6 @@ def test_user_pause_and_explicit_hard_budget_stop_automatic_dispatch(goal_env, m
     assert mgr.evaluate_after_turn('do not resume')['should_continue'] is False
 
 
-@pytest.mark.parametrize("instruction,accepted", [
-    ("Please fix the failing parser", True),
-    ("Can you implement retry recovery?", True),
-    ("Review this build and report only", False),
-    ("Explain how to fix a parser", False),
-    ("> fix the parser", False),
-    ("Fix the parser, report-only; do not change files", False),
-])
-def test_only_user_action_intent_creates_durable_mission(goal_env, instruction, accepted):
-    mgr = goal_env.GoalManager("intent-" + uuid.uuid4().hex)
-    assert mgr.ensure_requested_task(instruction) is accepted
-    if accepted:
-        reloaded = goal_env.GoalManager(mgr.session_id)
-        assert reloaded.state.continuation_pending
-        mgr.pause("user stopped")
-        assert not mgr.ensure_requested_task("fix something else")
-        assert goal_env.GoalManager(mgr.session_id).state.status == "paused"
 
 
 def test_empty_turn_recovery_is_durable_bounded_and_never_judged_done(goal_env, monkeypatch):

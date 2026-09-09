@@ -17,7 +17,7 @@ import os
 import random
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from agent.display import (
@@ -450,160 +450,6 @@ class _ToolCancelledResult(str):
     post_tool_call was already emitted, so a late-finishing abandoned worker must not report."""
 
 
-# --- self-healing tool execution -----------------------------------------
-# Re-ported 2026-09-04. agent/tool_result_classification.py (the classifier)
-# survived upstream d3630f85, but its integration point here did not, leaving
-# classify_tool_result / classify_tool_outcome / result_digest as dead code with
-# no callers — a capability that read as shipped and did nothing. This is the
-# executor half that makes it live again.
-# Module-level on purpose: tests monkeypatch agent.tool_executor.write_repair_receipt
-# and classify_tool_outcome directly, which a function-local import defeats.
-from agent.tool_result_classification import (  # noqa: E402
-    classify_tool_outcome, tool_may_have_side_effect, write_repair_receipt,
-)
-
-_RECOVERY_RETRY_BACKOFF_S = 0.25
-
-
-def _recovery_retry_enabled() -> bool:
-    """Whether the self-healing rail may re-run a failed read-only tool once.
-
-    DEFAULT OFF, deliberately. The retry is the one part of this rail that
-    changes OBSERVABLE behaviour: upstream's
-    tests/run_agent/test_tool_call_guardrail_runtime asserts exactly-once
-    dispatch, and a retry makes a failed web_search run twice. Classification,
-    repair receipts and the recovery observation are all side-effect-free and
-    stay on unconditionally; only the re-dispatch is opt-in via
-    ``tools.recovery_retry: true``.
-    """
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config() or {}
-        return bool((cfg.get("tools") or {}).get("recovery_retry", False))
-    except Exception:
-        return False
-
-_TOOL_RESULT_SHAPES: dict[str, type | tuple[type, ...]] = {
-    # read_file's transport contract is text; the remaining tools can return
-    # provider-specific envelopes and are intentionally treated as opaque.
-    "read_file": str,
-}
-
-
-def _json_object_or_none(value):
-    """Return the parsed dict when *value* is a JSON object, else None.
-
-    Used to protect wire contracts: a result the caller parses must not gain
-    prose appended to it.
-    """
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else None
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _recovery_observation(classification: dict[str, Any], instruction: str = "") -> str:
-    fields = {key: classification.get(key) for key in ("status", "retryable", "side_effect_risk", "result_digest")}
-    text = json.dumps(fields, sort_keys=True, separators=(",", ":"))
-    suffix = f" {instruction}" if instruction else ""
-    return f"\n[tool-recovery observation: {text}]{suffix}"
-
-
-def _repair_instruction(status: str) -> str:
-    if status == "empty_result":
-        return "Retry with a smaller or more specific request, or use an alternate read-only step."
-    if status == "timeout":
-        return "Use a smaller scope or bounded alternate step; do not repeat an effect-capable call."
-    if status == "malformed_result":
-        return "Use a simpler request and verify the returned structure before continuing."
-    return "Use a smaller or alternate step and verify its result before continuing."
-
-
-def _classify_and_recover_tool_result(
-    agent, *, function_name: str, function_args: dict, effective_task_id: str,
-    tool_call_id: str, result: Any, execute, blocked: bool = False,
-    timed_out: bool = False, error: Any = None,
-) -> Any:
-    """Classify a finished tool result; retry once when safe, else annotate it."""
-    if error is None and isinstance(result, str) and result.startswith("Error executing tool"):
-        error = result
-    expected_shape = _TOOL_RESULT_SHAPES.get(function_name)
-    classification = classify_tool_outcome(
-        result, tool_name=function_name, error=error, timed_out=timed_out,
-        blocked_risk=blocked, expected_shape=expected_shape,
-    )
-    if classification["status"] == "success":
-        return result
-    mission_id = effective_task_id or getattr(agent, "session_id", "") or "unknown"
-    turn_id = getattr(agent, "_current_turn_id", "") or "unknown"
-    try:
-        write_repair_receipt(
-            mission_id=mission_id, turn_id=turn_id, tool_call_id=tool_call_id,
-            classification=classification,
-            repair_disposition=("continue_smaller_step" if timed_out else "failure"),
-        )
-    except Exception:
-        logger.debug("tool recovery receipt write failed", exc_info=True)
-    # ANY result that is already a JSON object has a caller-visible wire contract
-    # (a blocked envelope, {"exit_code": N}, a provider payload) that downstream
-    # consumers parse. Record the classification for diagnostics, but never append
-    # recovery text that makes that payload unparsable or changes its shape.
-    #
-    # This was originally scoped to `blocked` only. Widened 2026-09-04 after the
-    # narrow version regressed tests/run_agent/test_tool_call_guardrail_runtime:
-    # annotating {"exit_code": 1} broke _detect_tool_failure's JSON parse, so the
-    # result stopped counting as a failure and the guardrail's
-    # same_tool_failure_warning was never appended. Corrupting a wire contract to
-    # add advice costs more than the advice is worth.
-    if blocked and isinstance(_json_object_or_none(result), dict):
-        return result
-    if (_recovery_retry_enabled() and classification["retryable"]
-            and not timed_out and not tool_may_have_side_effect(function_name)):
-        time.sleep(_RECOVERY_RETRY_BACKOFF_S)
-        retry_error = None
-        try:
-            retry_result = execute(function_args)
-        except Exception as exc:
-            retry_error = exc
-            retry_result = f"Error executing tool '{function_name}': {exc}"
-        retry_classification = classify_tool_outcome(
-            retry_result, tool_name=function_name, error=retry_error,
-            timed_out=isinstance(retry_result, _ToolTimeoutResult),
-            expected_shape=expected_shape,
-        )
-        try:
-            write_repair_receipt(
-                mission_id=mission_id, turn_id=turn_id, tool_call_id=tool_call_id,
-                classification=retry_classification, repair_disposition="retry",
-            )
-        except Exception:
-            logger.debug("tool recovery retry receipt write failed", exc_info=True)
-        if retry_classification["status"] == "success":
-            return retry_result
-        classification = retry_classification
-        result = retry_result
-    # A JSON-object result is a wire contract downstream code parses. Appending
-    # prose to it broke _detect_tool_failure's parse, which silently dropped the
-    # guardrail's same_tool_failure_warning. But simply skipping the observation
-    # loses the recovery signal entirely. So EMBED it as a field instead: the
-    # payload stays valid JSON for parsers, and the classification still reaches
-    # the model.
-    _payload = _json_object_or_none(result)
-    if isinstance(_payload, dict):
-        _payload["_tool_recovery"] = {
-            **{k: classification.get(k) for k in
-               ("status", "retryable", "side_effect_risk", "result_digest")},
-            "instruction": _repair_instruction(classification["status"]),
-        }
-        # Compact separators match _recovery_observation's serialization, so the
-        # embedded form is byte-comparable with the appended form.
-        embedded = json.dumps(_payload, ensure_ascii=False, separators=(",", ":"))
-        return _ToolTimeoutResult(embedded) if timed_out else embedded
-    observed = f"{result}{_recovery_observation(classification, _repair_instruction(classification['status']))}"
-    return _ToolTimeoutResult(observed) if timed_out else observed
-
-
 class _ConcurrentToolAuthorizationGate:
     """Serialize policy prompts and exclude human approval waits from batch deadlines.
 
@@ -808,11 +654,6 @@ def _dispatch_authorized_once(
             callback()
 
     block_message, block_error_type = scope_block, "tool_scope_block"
-    from agent.kanban_stop import native_worker_stop_status
-    owner_status = native_worker_stop_status()
-    if owner_status is not None:
-        block_message = f"Native worker ownership ended ({owner_status}); no further tool dispatch is authorized."
-        block_error_type = "native_worker_handoff"
     if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)  # noqa: E731
@@ -903,35 +744,19 @@ def _run_agent_tool_execution_middleware(
             **tool_hook_ids(agent, effective_task_id, tool_call_id),
         )
 
-    # A relay failure is a tool OUTCOME, not a control-flow escape: let it reach
-    # the recovery classifier so it is receipted and (when safe) retried, instead
-    # of propagating and costing the whole turn. Part of the self-healing rail
-    # re-ported 2026-09-04.
-    try:
-        state.result, _relay_args = relay_tools.execute(
-            function_name,
-            function_args,
-            _hermes_pipeline,
-            session_id=str(getattr(agent, "session_id", "") or ""),
-            tool_call_id=tool_call_id or None,
-            metadata={
-                "task_id": effective_task_id or "",
-                "turn_id": getattr(agent, "_current_turn_id", "") or "",
-                "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
-                "tool_call_id": tool_call_id or "",
-            },
-        )
-    except Exception as relay_error:
-        state.result = _classify_and_recover_tool_result(
-            agent,
-            function_name=function_name,
-            function_args=function_args,
-            effective_task_id=effective_task_id,
-            tool_call_id=tool_call_id,
-            result=f"Error executing tool '{function_name}': {relay_error}",
-            execute=execute,
-            error=relay_error,
-        )
+    state.result, _relay_args = relay_tools.execute(
+        function_name,
+        function_args,
+        _hermes_pipeline,
+        session_id=str(getattr(agent, "session_id", "") or ""),
+        tool_call_id=tool_call_id or None,
+        metadata={
+            "task_id": effective_task_id or "",
+            "turn_id": getattr(agent, "_current_turn_id", "") or "",
+            "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
+            "tool_call_id": tool_call_id or "",
+        },
+    )
     return state
 
 
@@ -1793,29 +1618,6 @@ def _run_sequential_call(
             _finish_quiet_tool_spinner(agent, dispatch.spinner, ref.name, ref.args, tool_duration, _spinner_result)
     if dispatch.finish_spinner and not dispatch.finish_in_finally:
         _finish_quiet_tool_spinner(agent, dispatch.spinner, ref.name, ref.args, tool_duration, _spinner_result)
-
-    # Self-healing rail. This is the one place that has BOTH the finished result
-    # and a re-runnable dispatch.execute, so it is where a safe retry can happen;
-    # _commit_tool_result (the other candidate) is post-execution and has no
-    # execute closure. Never raises: a failure in recovery must not lose a result
-    # the tool already produced.
-    try:
-        _recovered = _classify_and_recover_tool_result(
-            agent,
-            function_name=ref.name,
-            function_args=managed.args,
-            effective_task_id=ref.task_id,
-            tool_call_id=ref.call_id,
-            result=managed.result,
-            execute=dispatch.execute,
-            blocked=managed.blocked,
-            timed_out=isinstance(managed.result, (_ToolTimeoutResult, _ToolCancelledResult)),
-        )
-        if _recovered is not managed.result:
-            managed = replace(managed, result=_recovered)
-    except Exception:
-        logger.debug("tool recovery rail failed; keeping the original result", exc_info=True)
-
     return managed, tool_duration
 
 
