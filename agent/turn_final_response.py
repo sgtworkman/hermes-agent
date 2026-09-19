@@ -165,6 +165,7 @@ def finish_text_response(
                 _frag.pop("_length_continuation_nudge", None)
 
     final_response = agent._strip_think_blocks(final_response).strip()
+    agent._length_reasoning_exhausted = False
 
     final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 

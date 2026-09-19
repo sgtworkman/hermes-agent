@@ -39,6 +39,8 @@ class ToolRoundVerdict:
     failed: Any
     _turn_exit_reason: Any
     truncated_tool_call_retries: Any
+    length_continue_retries: Any = 0
+    truncated_response_parts: Any = None
     result: Optional[Dict[str, Any]] = None
 
 
@@ -47,7 +49,8 @@ def run_tool_round(
     conversation_history: Any, api_call_count: Any, effective_task_id: Any, user_message: Any,
     system_message: Any, active_system_prompt: Any, compression_attempts: Any,
     max_compression_attempts: Any, final_response: Any, failed: Any, _turn_exit_reason: Any,
-    truncated_tool_call_retries: Any,
+    truncated_tool_call_retries: Any, length_continue_retries: Any = 0,
+    truncated_response_parts: Any = None, current_turn_user_idx: Any = None,
 ) -> ToolRoundVerdict:
     """Execute one tool round in the exact original order. Persist-before-execute is a
     durability invariant: resume must see the executed block if a destructive tool restarts
@@ -60,7 +63,9 @@ def run_tool_round(
             action=action, messages=messages, conversation_history=conversation_history,
             active_system_prompt=active_system_prompt, compression_attempts=compression_attempts,
             final_response=final_response, failed=failed, _turn_exit_reason=_turn_exit_reason,
-            truncated_tool_call_retries=truncated_tool_call_retries, result=result,
+            truncated_tool_call_retries=truncated_tool_call_retries,
+            length_continue_retries=length_continue_retries,
+            truncated_response_parts=truncated_response_parts, result=result,
         )
 
     if not agent.quiet_mode:
@@ -149,6 +154,7 @@ def run_tool_round(
         with suppress(Exception):
             agent.stream_delta_callback(None)
 
+    tool_result_start = len(messages)
     agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
     if getattr(agent, "_incremental_persistence_failed", False):
@@ -177,6 +183,22 @@ def run_tool_round(
 
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
+    if length_continue_retries:
+        from agent.display import _detect_tool_failure
+        recovered = any(
+            m.get("role") == "tool" and not _detect_tool_failure(m.get("name", ""), m.get("content"))[0]
+            for m in messages[tool_result_start:]
+        )
+        if recovered:
+            # Successful tool work ends this truncation episode; errors do not.
+            # Keep durable narration, but do not stitch it into a later final answer.
+            length_continue_retries = 0
+            truncated_response_parts = []
+            agent._length_reasoning_exhausted = False
+            turn_start = current_turn_user_idx + 1 if isinstance(current_turn_user_idx, int) else 0
+            for message in messages[turn_start:]:
+                message.pop("_length_continuation_fragment", None)
+                message.pop("_length_continuation_nudge", None)
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real
     # text arrives, so tool iterations don't stack blank lines.
     agent._stream_needs_break = True

@@ -1347,7 +1347,7 @@ def _reasoning_config_for_wire(agent):
         ):
             return None
         return cfg
-    if ephemeral_off:
+    if ephemeral_off or getattr(agent, "_length_reasoning_exhausted", False):
         cfg = {**(cfg or {}), "enabled": False, "effort": "none"}
     return cfg
 

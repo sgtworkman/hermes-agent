@@ -1459,6 +1459,7 @@ def run_conversation(
     agent._last_persistence_error_cause = None
     agent._compression_adoption_failed = False
     agent._ephemeral_reasoning_off = False
+    agent._length_reasoning_exhausted = False
     agent._auth_pool_refresh_counts = {}
     agent._last_turn_usage = None
 

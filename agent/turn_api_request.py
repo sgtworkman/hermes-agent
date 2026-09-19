@@ -96,6 +96,7 @@ def build_api_request(
     system_message: Any, messages: Any, original_user_message: Any, approx_tokens: Any,
     total_chars: Any, retry_count: Any, api_call_count: Any, api_request_id: Any,
     api_start_time: Any, effective_task_id: Any, turn_id: Any,
+    request_pressure_tokens: Any = None,
 ) -> ApiRequestBuild:
     """Assemble the attempt's request in the original order (every mutation happens BEFORE
     middleware/hooks/debug dumps observe the payload)."""
@@ -160,6 +161,9 @@ def build_api_request(
     except Exception:
         _original_api_kwargs = dict(api_kwargs)
         _llm_middleware_trace = []
+
+    from agent.request_output_budget import clamp_chat_output_budget
+    clamp_chat_output_budget(agent, api_kwargs, request_pressure_tokens)
 
     _fire_pre_api_request_hook(
         agent, api_kwargs, api_messages, _llm_middleware_trace, messages=messages,

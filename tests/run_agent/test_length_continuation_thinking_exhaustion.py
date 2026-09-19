@@ -95,7 +95,7 @@ def loop_agent():
         patch("agent.process_bootstrap.OpenAI"),
     ):
         a = AIAgent(
-            api_key="test-key-1234567890",
+            api_key="test",
             base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
@@ -265,18 +265,11 @@ class TestReasoningOffReachesTheWire:
             f"continuation must be sent with thinking off, got {second!r}"
         )
 
-    def test_reasoning_off_is_exactly_one_request_and_prefix_stays_stable(self, loop_agent):
-        """Prompt-cache invariant for the override.
+    def test_reasoning_off_covers_recovery_episode_and_prefix_stays_stable(self, loop_agent):
+        """Recovery changes request parameters until the answer finishes.
 
-        The reasoning parameter is part of the provider's cache key on
-        config-sensitive providers (Anthropic renders thinking/effort into
-        the prompt; OpenAI lists reasoning.effort as a prefix-affecting
-        setting), so the reasoning-off request is a deliberate one-request
-        cache miss.  It must stay exactly one request: the request AFTER it
-        (a second, visible-text continuation) must go out with the
-        configured reasoning again, and the system prompt must be
-        byte-identical on every request so the miss never compounds into a
-        rebuilt prefix.
+        Re-enabling thinking between visible fragments can exhaust the
+        budget again. The system prompt stays byte-identical throughout.
         """
         loop_agent.reasoning_config = {"enabled": True, "effort": "high"}
         loop_agent._supports_reasoning_extra_body = lambda: True
@@ -297,8 +290,8 @@ class TestReasoningOffReachesTheWire:
         ]
         assert wire[0] == {"enabled": True, "effort": "high"}, wire
         assert wire[1] == {"enabled": False, "effort": "none"}, wire
-        assert wire[2] == {"enabled": True, "effort": "high"}, (
-            f"reasoning must be restored on the very next request; got {wire!r}"
+        assert wire[2] == {"enabled": False, "effort": "none"}, (
+            f"reasoning must stay off until recovery finishes; got {wire!r}"
         )
         system_prompts = {
             c.kwargs["messages"][0]["content"] for c in calls

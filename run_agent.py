@@ -1151,9 +1151,11 @@ class AIAgent(
     def _cap_delegate_task_calls(tool_calls: list) -> list:
         """Cap delegate_task calls in one turn at max_concurrent_children (non-delegate calls all kept);
         returns the original list when nothing was truncated."""
+        delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
+        if not delegate_count:
+            return tool_calls
         from tools.delegate_tool import _get_max_concurrent_children
         max_children = _get_max_concurrent_children()
-        delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
         if delegate_count <= max_children:
             return tool_calls
         kept_delegates, truncated = 0, []

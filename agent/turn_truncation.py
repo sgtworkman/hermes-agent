@@ -180,6 +180,7 @@ def _content_filter_fallback(st: _Trunc, _retry: TurnRetryState) -> Optional[Tru
         agent._session_messages = st.messages
         st.length_continue_retries = 0
         st.truncated_response_parts = []
+        agent._length_reasoning_exhausted = False
         st.retry_count = 0
         st.compression_attempts = 0
         _retry.primary_recovery_attempted = False
@@ -207,6 +208,10 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
     _interim_content = getattr(assistant_message, "content", None)
     if not _interim_content and not st.is_stub:
         # Thinking-only truncation: continuing with thinking ON re-burns the budget.
+        agent._length_reasoning_exhausted = True
+    if getattr(agent, "_length_reasoning_exhausted", False):
+        # An answer fragment can itself hit length. Keep the recovery mode through
+        # that episode instead of alternating thinking-on and thinking-off calls.
         agent._ephemeral_reasoning_off = True
     if _interim_content:
         interim_msg = agent._build_assistant_message(assistant_message, st.finish_reason)
@@ -236,6 +241,7 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
     partial_response = agent._strip_think_blocks(_join_truncated_parts(st.truncated_response_parts)).strip()
     # The one-shot reasoning-off override must not leak into the next turn.
     agent._ephemeral_reasoning_off = False
+    agent._length_reasoning_exhausted = False
     agent._vprint(
         f"{agent.log_prefix}⚠️  Response still truncated after {n} continuation attempts — "
         + ("keeping the partial response received so far." if partial_response
