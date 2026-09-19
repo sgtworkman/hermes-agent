@@ -181,11 +181,11 @@ def test_goal_bare_shows_status_when_none_set(server, session):
 
 
 def _exhaust_budget(session_key: str, goal_text: str = "finish the benchmark"):
-    """Set a 1-turn goal and drive it to budget-exhaustion auto-pause."""
+    """Set a 1-turn goal and drive it to explicit-resource-limit pause."""
     from hermes_cli.goals import GoalManager
 
     mgr = GoalManager(session_key)
-    mgr.set(goal_text, max_turns=1)
+    mgr.set(goal_text, max_turns=1, max_total_turns=1)
     with patch(
         "hermes_cli.goals.judge_goal",
         return_value=("continue", "needs more steps", False, None, False),
@@ -288,7 +288,11 @@ def test_active_goal_retries_once_without_judging_failed_turn(
 
     server._run_prompt_submit("rid", "sid", session, "initial work")
 
-    assert seen_prompts == ["initial work", continuation]
+    assert len(seen_prompts) == 2
+    assert seen_prompts[0].endswith("initial work")
+    assert "Task workspace:" in seen_prompts[0]
+    assert seen_prompts[1].startswith(continuation)
+    assert "context_compression_exhausted" in seen_prompts[1]
     assert judged == ["recovered work"]
     assert GoalManager(session_key).state.turns_used == 0
     assert server._GOAL_COMPRESSION_RECOVERY_ATTEMPTS not in session
@@ -296,7 +300,7 @@ def test_active_goal_retries_once_without_judging_failed_turn(
     assert [p["status"] for p in completes] == ["error", "complete"]
 
 
-def test_second_consecutive_exhaustion_pauses_goal_instead_of_looping(
+def test_third_unchanged_exhaustion_holds_with_durable_recovery_evidence(
     server, turn_env, monkeypatch
 ):
     from hermes_cli.goals import GoalManager
@@ -324,20 +328,20 @@ def test_second_consecutive_exhaustion_pauses_goal_instead_of_looping(
 
     server._run_prompt_submit("rid", "sid", session, "initial work")
 
-    assert len(seen_prompts) == 2
+    assert len(seen_prompts) == 3
     assert judged == []
     state = GoalManager(session_key).state
     assert state.status == "paused"
     assert state.turns_used == 0
-    assert "compression exhausted twice" in state.paused_reason
+    assert "NO_PROGRESS" in state.paused_reason
     assert server._GOAL_COMPRESSION_RECOVERY_ATTEMPTS not in session
     notices = [
         p["text"]
         for event, _sid, p in turn_env
         if event == "status.update" and p.get("kind") == "goal"
     ]
-    assert any("Retrying the active goal once" in text for text in notices)
-    assert any("Goal paused" in text for text in notices)
+    assert any("checkpointed" in text for text in notices)
+    assert any("Goal held" in text for text in notices)
 
 
 def test_real_queued_prompt_preempts_goal_compression_retry(
@@ -374,7 +378,9 @@ def test_real_queued_prompt_preempts_goal_compression_retry(
 
     server._run_prompt_submit("rid", "sid", session, "initial work")
 
-    assert seen_prompts == ["initial work", "real user input"]
+    assert len(seen_prompts) == 2
+    assert seen_prompts[0].endswith("initial work")
+    assert seen_prompts[1].endswith("real user input")
     assert continuation not in seen_prompts
     assert server._GOAL_COMPRESSION_RECOVERY_ATTEMPTS not in session
 
@@ -438,7 +444,7 @@ def test_new_goal_does_not_inherit_previous_goal_recovery_attempt(server):
     assert first_prompt is not None
     assert replacement_prompt is not None
     assert "replacement goal" in replacement_prompt
-    assert "Retrying the active goal once" in replacement_notice
+    assert "checkpointed" in replacement_notice
     assert GoalManager(session_key).state.status == "active"
 
 
@@ -528,3 +534,48 @@ def test_goal_draft_uses_session_profile_without_blocking_rpc_reader(
         assert state.max_turns == 37 and state.contract.verification == "tests pass"
     result = next(frame["result"] for frame in frames if frame.get("id") == "draft")
     assert result["type"] == "send" and result["message"] == state.goal
+
+
+@pytest.mark.parametrize("guard", ["idle", "busy", "paused", "gateway", "gateway_unbound", "queued"])
+def test_saved_continuation_recovers_only_on_its_idle_owner(server, session, monkeypatch, guard):
+    from hermes_cli import goals
+    sid, key, state = session
+    mgr = goals.GoalManager(key)
+    mgr.set("repair the fixture")
+    mgr.checkpoint_continuation("dispatch previously failed")
+    if guard == "busy":
+        state["running"] = True
+    elif guard == "paused":
+        mgr.pause("user stopped")
+    elif guard == "gateway":
+        mgr.state.route = {"platform": "discord", "chat_id": "fixture"}
+        goals.save_goal(key, mgr.state)
+    elif guard == "gateway_unbound":
+        db = MagicMock()
+        db.get_session.return_value = {"source": "discord"}
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+    elif guard == "queued":
+        state["queued_prompt"] = "user input wins"
+    dispatched = []
+    monkeypatch.setattr(server, "_notif_submit", lambda *a, **kw: dispatched.append(a))
+    server._maybe_resume_tui_goal(sid, state)
+    assert len(dispatched) == (1 if guard == "idle" else 0)
+
+
+def test_context_failure_uses_supported_compaction_before_retry(server, session, monkeypatch):
+    from hermes_cli.goals import GoalManager
+    sid, key, state = session
+    state["agent"] = types.SimpleNamespace(_compress_context=lambda: None)
+    GoalManager(key).set("repair and verify the fixture")
+    calls = []
+    monkeypatch.setattr(server, "_compress_live", lambda *a: calls.append(a))
+    prompt, _ = server._plan_goal_compression_recovery(
+        state, _compression_failure(), status="error", raw="context exceeded", sid=sid)
+    assert len(calls) == 1
+    assert calls[0][1:3] == (sid, state)
+    assert "repair and verify the fixture" in prompt
+    assert GoalManager(key).state.continuation_pending
+    stopped, _ = server._plan_goal_compression_recovery(
+        state, _compression_failure(), status="interrupted", raw="stopped", sid=sid)
+    assert stopped is None and len(calls) == 1
+    assert GoalManager(key).state.status == "paused"

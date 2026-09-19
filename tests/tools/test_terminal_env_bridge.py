@@ -152,3 +152,38 @@ def test_bridge_config_failure_does_not_crash(monkeypatch):
 
     assert config["env_type"] == "ssh"
     assert config["ssh_host"] == "example.test"
+
+
+def test_cli_workspace_is_not_overwritten_by_later_fallback_bridge(tmp_path, monkeypatch):
+    task = tmp_path / "task"
+    configured = tmp_path / "profile-default"
+    task.mkdir()
+    configured.mkdir()
+    _write_config("terminal:\n  backend: local\n  cwd: " + str(configured) + "\n")
+    monkeypatch.chdir(task)
+    from types import SimpleNamespace
+    from hermes_cli.main import _apply_in_dir
+    _apply_in_dir(SimpleNamespace(in_dir=str(task)))
+    import cli
+    cli.load_cli_config()
+    assert os.environ["TERMINAL_CWD"] == str(task)
+    from hermes_cli.env_loader import _reapply_terminal_config_bridge
+    _reapply_terminal_config_bridge(get_hermes_home())
+    assert os.environ["TERMINAL_CWD"] == str(task)
+    actual = terminal_tool._get_env_config()
+    assert actual["cwd"] == str(task)
+    assert os.environ["TERMINAL_CWD"] == str(task)
+
+
+@pytest.mark.parametrize("backend,expected", [("local", "task"), ("docker", "/container-task")])
+def test_runtime_workspace_preserves_backend_and_survives_partial_config(tmp_path, monkeypatch, backend, expected):
+    task = tmp_path / "task"
+    task.mkdir()
+    _write_config("terminal:\n  backend: " + backend + "\n" +
+                  ("  cwd: /container-task\n" if backend == "docker" else ""))
+    from hermes_cli.config import apply_terminal_config_to_env, set_terminal_runtime_cwd
+    set_terminal_runtime_cwd(str(task))
+    monkeypatch.setenv("TERMINAL_CWD", "/stale-env-directory")
+    apply_terminal_config_to_env()
+    assert os.environ["TERMINAL_ENV"] == backend
+    assert os.environ["TERMINAL_CWD"] == (str(task) if expected == "task" else expected)

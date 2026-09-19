@@ -232,14 +232,14 @@ def test_changed_workspace_reruns_gate():
 
 def test_gate_continuation_respects_turn_budget():
     mgr = GoalManager(session_id="gate-budget-sid", default_max_turns=1)
-    mgr.set("budget goal")
+    mgr.set("budget goal", max_total_turns=1)
     mgr.add_gate("exit 1")
     with patch("hermes_cli.goals.judge_goal"), \
          patch("hermes_cli.goals.workspace_fingerprint", return_value=""):
         decision = mgr.evaluate_after_turn("only turn")
     assert decision["status"] == "paused"
     assert decision["should_continue"] is False
-    assert "turns used" in decision["message"]
+    assert "resource limit" in decision["message"]
 
 
 def test_no_gates_behaves_exactly_as_before():

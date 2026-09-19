@@ -59,9 +59,9 @@ def hermes_home(tmp_path, monkeypatch):
 
 
 def _exhaust_budget(session_id: str, goal_text: str = "ship the benchmark"):
-    """Set a 1-turn goal and drive it to budget-exhaustion auto-pause."""
+    """Set a 1-turn goal and drive it to explicit-resource-limit pause."""
     mgr = goals.GoalManager(session_id)
-    mgr.set(goal_text, max_turns=1)
+    mgr.set(goal_text, max_turns=1, max_total_turns=1)
     with patch(
         "hermes_cli.goals.judge_goal",
         return_value=("continue", "needs more steps", False, None, False),
@@ -69,7 +69,7 @@ def _exhaust_budget(session_id: str, goal_text: str = "ship the benchmark"):
         decision = mgr.evaluate_after_turn("worked a bit")
     assert decision["status"] == "paused"
     assert decision["should_continue"] is False
-    assert "turn budget exhausted" in (mgr.state.paused_reason or "")
+    assert "resource limit" in (mgr.state.paused_reason or "")
     return mgr
 
 

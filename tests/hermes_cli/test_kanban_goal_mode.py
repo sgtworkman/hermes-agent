@@ -224,3 +224,136 @@ class TestCLIJudgeGate:
         assert complete_calls == [], "an unachievable goal must never reach complete_task"
         assert "unachievable" in err.lower()
         assert "kanban block" in err.lower()
+
+
+def test_goal_checkpoint_requeues_same_task_and_fences_old_worker(kanban_home, tmp_path):
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="repair fixture", goal_mode=True,
+                             workspace_path=str(tmp_path))
+        first = kb.claim_task(conn, key)
+        assert first is not None
+        assert kb.checkpoint_goal_continuation(conn, key, expected_run_id=first.current_run_id,
+                                               reason="batch checkpoint; repair continues")
+        queued = kb.get_task(conn, key)
+        assert queued.status == "ready"
+        assert queued.workspace_path == str(tmp_path)
+        second = kb.claim_task(conn, key)
+        assert second.current_run_id != first.current_run_id
+        assert not kb.checkpoint_goal_continuation(conn, key, expected_run_id=first.current_run_id,
+                                                   reason="stale completion")
+        assert kb.get_task(conn, key).current_run_id == second.current_run_id
+        assert kb.get_task(conn, key).status == "running"
+
+
+
+def test_empty_worker_output_is_repaired_without_completion_judgment(monkeypatch):
+    monkeypatch.setattr(goals, "judge_goal", lambda *a, **k: pytest.fail("empty output reached judge"))
+    observed = []
+    status = ["running"]
+    def repair(prompt):
+        observed.append(prompt)
+        status[0] = "done"
+        return "verified result"
+    result = goals.run_kanban_goal_loop(
+        task_id="empty-worker", goal_text="repair the fixture", first_response="",
+        run_turn=repair, task_status_fn=lambda: status[0],
+        block_fn=lambda r: pytest.fail("known repair was blocked"), max_turns=3,
+    )
+    assert result["outcome"] == "completed_by_worker"
+    assert len(observed) == 1
+    assert "empty" in observed[0].lower() or "usable" in observed[0].lower()
+
+
+def test_explicit_card_budget_survives_checkpoint_and_reclaim(kanban_home):
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="bounded repair", goal_mode=True, goal_max_turns=3)
+        first = kb.claim_task(conn, key)
+        assert kb.checkpoint_goal_continuation(conn, key, expected_run_id=first.current_run_id,
+                                               reason="repair interrupted", turns_used=2)
+        assert kb.goal_continuation_turns(conn, key) == 2
+        second = kb.claim_task(conn, key)
+        assert second is not None
+        assert kb.checkpoint_goal_continuation(conn, key, expected_run_id=second.current_run_id,
+                                               reason="still requires repair", turns_used=1)
+        assert kb.get_task(conn, key).status == "blocked"
+        assert kb.goal_continuation_turns(conn, key) == 3
+        assert kb.claim_task(conn, key) is None
+        assert not kb.checkpoint_goal_continuation(conn, key, expected_run_id=first.current_run_id,
+                                                   reason="stale worker", turns_used=1)
+        assert kb.goal_continuation_turns(conn, key) == 3
+
+
+def test_checkpoint_reports_owner_hold_instead_of_claiming_requeue(monkeypatch):
+    _patch_judge(monkeypatch, ["continue"])
+    status = ["running"]
+    def checkpoint(reason, *, turns_used):
+        assert turns_used == 1
+        status[0] = "blocked"
+        return True
+    result = goals.run_kanban_goal_loop(
+        task_id="limited", goal_text="repair within limit", first_response="not finished",
+        run_turn=lambda p: pytest.fail("must not exceed limit"), task_status_fn=lambda: status[0],
+        block_fn=lambda r: pytest.fail("owner already held task"), max_turns=1,
+        checkpoint_fn=checkpoint,
+    )
+    assert result["outcome"] == "held_by_owner"
+
+
+
+def test_one_turn_card_cannot_requeue_its_exhausted_allowance(kanban_home):
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="one turn only", goal_mode=True, goal_max_turns=1)
+        owner = kb.claim_task(conn, key)
+        assert kb.checkpoint_goal_continuation(conn, key, expected_run_id=owner.current_run_id,
+                                               reason="batch exhausted")
+        assert kb.get_task(conn, key).status == "blocked"
+
+
+
+def test_turn_reservation_survives_reload_before_worker_checkpoint(kanban_home):
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="crash-safe budget", goal_mode=True, goal_max_turns=2)
+        owner = kb.claim_task(conn, key)
+        assert kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+    with kbc.connect() as conn:
+        assert kb.goal_continuation_turns(conn, key) == 1
+        assert kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+        assert not kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+        assert kb.goal_continuation_turns(conn, key) == 2
+        assert kb.get_task(conn, key).status == "blocked"
+
+
+def test_checkpoint_does_not_double_count_reserved_turns(kanban_home):
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="continue within budget", goal_mode=True, goal_max_turns=4)
+        owner = kb.claim_task(conn, key)
+        assert kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+        assert kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+        assert kb.checkpoint_goal_continuation(conn, key, expected_run_id=owner.current_run_id,
+                                               reason="repair continues", turns_used=2)
+        assert kb.goal_continuation_turns(conn, key) == 2
+        successor = kb.claim_task(conn, key)
+        assert not kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+        assert kb.begin_goal_turn(conn, key, expected_run_id=successor.current_run_id)
+        assert kb.goal_continuation_turns(conn, key) == 3
+
+
+
+def test_quiet_worker_checks_persisted_limit_before_calling_model(kanban_home, monkeypatch):
+    from types import SimpleNamespace
+    import cli
+    with kbc.connect() as conn:
+        key = kb.create_task(conn, title="no extra model call", goal_mode=True, goal_max_turns=1)
+        owner = kb.claim_task(conn, key)
+        assert kb.begin_goal_turn(conn, key, expected_run_id=owner.current_run_id)
+    monkeypatch.setenv("HERMES_KANBAN_GOAL_MODE", "1")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", key)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(owner.current_run_id))
+    fake = SimpleNamespace(agent=SimpleNamespace(
+        run_conversation=lambda **kw: pytest.fail("exhausted task dispatched a model call")))
+    with pytest.raises(SystemExit) as stopped:
+        cli._run_quiet_single_query(fake, "continue")
+    assert stopped.value.code == 1
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, key).status == "blocked"
+        assert kb.goal_continuation_turns(conn, key) == 1
