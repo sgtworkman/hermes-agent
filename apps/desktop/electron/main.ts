@@ -166,6 +166,7 @@ import {
   parseBackendScopeKey,
   reconcileAppliedGlobalConnection,
   reconcileRegistryDrift,
+  registryDialConnectionId,
   rememberSshEnumeration,
   removeConnection,
   type ResolvedConnectionDescriptor,
@@ -299,6 +300,7 @@ import { createLocalBackendLifecycle, waitForTeardown } from './local-backend-li
 import { localSkinProfileKey, readLocalSkinPayload } from './local-skin'
 import { ACTIVE_LOG_POLL_MS, planLogRotation, reclaimActiveLogIfOversized } from './log-rotation'
 import { registerMachineProfile } from './machine-profile'
+import { createMainProcessLagWatchdog } from './main-process-lag-watchdog'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
@@ -1902,6 +1904,18 @@ function rememberLog(chunk) {
 
   scheduleDesktopLogFlush()
 }
+
+// Main-process stalls leave renderer-scoped lifecycle logging unable to run.
+// When the loop resumes, retain the delayed timer's timing in desktop.log so a
+// Windows AppHang report can be correlated without changing tray semantics.
+const mainProcessLagWatchdog = createMainProcessLagWatchdog({
+  cadenceMs: 1_000,
+  thresholdMs: 2_000,
+  now: Date.now,
+  log: rememberLog,
+  setInterval,
+  clearInterval
+})
 
 installCrashForensics({ flush: flushDesktopLogBufferSync, log: rememberLog })
 
@@ -10565,7 +10579,7 @@ async function ensureRegistryBackend(
   const spawnPriority = spawnPriorityFrom(opts.spawnPriority)
   const passive = Boolean(opts.passive)
   const registry = readDesktopConnectionsRegistry()
-  const id = String(connectionId || '').trim() || registry.primary
+  const id = registryDialConnectionId(connectionId, registry.primary)
   const source = registry.connections.find(c => c.id === id)
 
   if (!source) {
@@ -10659,10 +10673,23 @@ async function ensureRegistryBackend(
     // can't collide with the v1 remote descriptor cached at the bare key.
     profileDeletionGate.assertCanStart(profileKey)
 
-    const localRoute = resolveRegistryLocalRoute(profileKey, {
+    const rawProfile = String(profile ?? '').trim()
+
+    const localProfileExists = rawProfile
+      ? directoryExists(path.join(HERMES_HOME, 'profiles', rawProfile.toLowerCase()))
+      : undefined
+
+    // Pass the raw profile, not profileKey: profileKey collapses null to
+    // 'default' and would refuse an unprofiled enumeration as a concrete dial.
+    const localRoute = resolveRegistryLocalRoute(rawProfile || null, {
       globalRemote: globalRemoteActive(),
-      profileRemoteOverride: Boolean(profileHasRemoteOverride(profileKey))
+      profileRemoteOverride: Boolean(profileHasRemoteOverride(profileKey)),
+      ...(rawProfile ? { localProfileExists } : {})
     })
+
+    if (localRoute.refuse) {
+      throw new Error(localRoute.refuse)
+    }
 
     if (localRoute.delegate) {
       return ensureBackend(profile, { passive, spawnPriority })
@@ -14557,14 +14584,16 @@ async function connectDesktopProfileRoute(
 }
 
 // Registry-scoped variant: resolve a backend for (connectionId, profile).
-// connectionId '' / 'local' / the registry primary all behave sensibly; the
-// local kind delegates to ensureBackend when the v1 route is local, and
-// forces a genuinely-local child when the v1 global mode is remote (the
-// registry 'local' entry always means this machine).
+// An empty connection id is not registry.primary — that substitution dials
+// another SSH host when a scoped caller drops the id. 'local' and an explicit
+// primary id still resolve to those sources. The local kind delegates to
+// ensureBackend when the v1 route is local, and forces a genuinely-local
+// child when the v1 global mode is remote (the registry 'local' entry always
+// means this machine) unless the profile is remote-only.
 ipcMain.handle('hermes:connection:for', async (_event, payload) => {
   const { connectionId, profile, priority } = payload && typeof payload === 'object' ? (payload as any) : ({} as any)
   const registry = readDesktopConnectionsRegistry()
-  const id = String(connectionId || '').trim() || registry.primary
+  const id = registryDialConnectionId(connectionId, registry.primary)
   const spawnPriority = spawnPriorityFrom(priority)
 
   return connectDesktopProfileRoute(
@@ -18008,6 +18037,7 @@ app.whenReady().then(() => {
   registerPowerResumeListeners()
   keepAwake.set(readPersistedKeepAwake())
   void minimizeToTray.start()
+  mainProcessLagWatchdog.start()
   f12Blocked = readPersistedDisableF12()
   // Seed this before the first window exists: a picker can open before
   // startHermes() finishes resolving the configured backend.
@@ -18207,6 +18237,7 @@ app.on('before-quit', event => {
   }
 
   minimizeToTray.beginQuit()
+  mainProcessLagWatchdog.stop()
 
   // A detached remote updater can outlive this Electron process. Do not tear
   // down its SSH observer/restore transaction at the generic SSH shutdown
