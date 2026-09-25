@@ -1,3 +1,4 @@
+import { replaceEqualDeep } from '@tanstack/react-query'
 import { atom, computed } from 'nanostores'
 
 import type { NewSessionPlacement } from '@/app/chat/new-session-drag'
@@ -428,7 +429,10 @@ let projectTreeRefreshGeneration = 0
 
 function applyProjectTreePayload(res: ProjectTreePayload): void {
   const scoped = new Set(res.scoped_session_ids ?? [])
-  $projectTree.set(res.projects ?? [])
+  // The tree refreshes on every sessions.changed and window focus, and most of
+  // those answers are unchanged. Keep unchanged nodes by reference so the
+  // entered project doesn't refetch and rebuild on a no-op (#77591).
+  $projectTree.set(replaceEqualDeep($projectTree.get(), res.projects ?? []))
   $activeProjectId.set(res.active_id ?? null)
   const tombstones = $removedSessionIds.get()
 

@@ -878,6 +878,10 @@ class AgentBrowser(BinaryPackage):
         for item in bin_dir.iterdir():
             if item.is_file() and item.name.startswith("agent-browser-") and item.name != keep:
                 item.unlink()
+        # The npm tarball ships every native binary as 0644; agent-browser's
+        # own postinstall sets the exec bit, and pm runs no postinstall.
+        kept = bin_dir / keep
+        kept.chmod(kept.stat().st_mode | 0o111)
 
 
 @register
