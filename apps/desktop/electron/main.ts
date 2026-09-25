@@ -6624,8 +6624,23 @@ function installDevToolsShortcut(window) {
 }
 
 function installPreviewShortcut(window) {
+  let focusedAt = 0
+
+  window.on('focus', () => {
+    focusedAt = Date.now()
+  })
+
   window.webContents.on('before-input-event', (event, input) => {
-    const action = windowAcceleratorAction(input, IS_MAC)
+    const action = windowAcceleratorAction(input, IS_MAC, Date.now() - focusedAt)
+
+    // A ⌘W/⌘R that auto-repeats or lands right as focus arrives belongs to
+    // the app that just lost focus (#105498). Claim it so the renderer's
+    // keybind doesn't act on it either, and do nothing.
+    if (action === 'swallow') {
+      event.preventDefault()
+
+      return
+    }
 
     // Always claim ⌘W here (the File>Close item deliberately has no
     // accelerator, so nothing else does). The renderer decides tab-vs-window

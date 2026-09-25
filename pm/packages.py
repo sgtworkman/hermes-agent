@@ -385,8 +385,13 @@ class Venv(StatePackage):
         h.update(members_stamp(enabled_member_dirs() if plugin_dirs is None else plugin_dirs).encode())
         return h.hexdigest()
 
-    def apply(self, extras: list[str], *, plugin_dirs=None, repair: bool = False, explicit: bool = False) -> dict:
-        """Prepare one complete environment; the caller commits its selection."""
+    def apply(self, extras: list[str], *, plugin_dirs=None, repair: bool = False, explicit: bool = False,
+              skip_invalid_secondary: bool = False) -> dict:
+        """Prepare one complete environment; the caller commits its selection.
+
+        ``skip_invalid_secondary`` is the update's contract: an unreadable secondary profile
+        is left out (the caller reports it) instead of refusing the whole graph.
+        """
         import uuid
         from pm.environments import install_state_dir, runtime_facts_path
         from pm.environment import managed_environment
@@ -402,8 +407,9 @@ class Venv(StatePackage):
         if not repair:
             # Inspection may skip a broken secondary profile, but publishing a replacement
             # graph must not silently evict its recorded members (including passed candidates).
+            # An update does evict them, loudly: it must not fail on another profile's config.
             from pm.plugins_state import enabled_plugins_ordered
-            enabled_plugins_ordered()
+            enabled_plugins_ordered(skip_invalid_secondary=skip_invalid_secondary)
         members = [] if repair else (enabled_member_dirs() if plugin_dirs is None else plugin_dirs)
         try:
             generation.mkdir(parents=True)
