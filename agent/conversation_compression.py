@@ -1692,8 +1692,14 @@ def _adopt_live_compression_child(
     agent.session_id = child_session_id
     _rebind_session_context(child_session_id)
     agent._session_db_created = True
-    if child.get("system_prompt"):
-        agent._cached_system_prompt = child["system_prompt"]
+    # The turn skips restore/rebuild while this slot is set, so it may hold only the child's own
+    # prompt, and only when that prompt matches the current runtime (otherwise None -> rebuild).
+    # Turn-start adoption runs before _restore_primary_runtime on purpose; a reject here is re-checked by the normal restore.
+    from agent.conversation_loop import _stored_prompt_matches_runtime
+    child_prompt = child.get("system_prompt")
+    agent._cached_system_prompt = (
+        child_prompt if child_prompt and _stored_prompt_matches_runtime(agent, child_prompt) else None
+    )
     agent._last_flushed_db_idx = len(recovered)
     agent._flushed_db_message_session_id = child_session_id
     agent._flushed_db_message_ids = {id(message) for message in recovered if isinstance(message, dict)}
