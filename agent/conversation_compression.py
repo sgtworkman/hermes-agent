@@ -3399,8 +3399,8 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
             )
 
 
-def _reset_read_dedup_caches(task_id: str, *, session_id: str = "", skills: bool = True) -> None:
-    """Advance the file-read (and skill_view) repeat-read dedup to a fresh generation after a boundary.
+def _reset_read_dedup_caches(task_id: str, *, session_id: str = "") -> None:
+    """Advance the file-read and skill_view repeat-read dedup to a fresh generation after a boundary.
     The mtime map is kept: the first read of each unchanged key returns full content compaction may have
     omitted; later reads return stubs, and stub-hit counters restart at the same boundary (#84857).
     The computer_use screenshot dedup is session-keyed and forgets its last frame for the same reason.
@@ -3412,8 +3412,6 @@ def _reset_read_dedup_caches(task_id: str, *, session_id: str = "", skills: bool
         with contextlib.suppress(Exception):
             from tools.computer_use.tool import reset_screenshot_dedup
             reset_screenshot_dedup(session_id)
-    if not skills:
-        return
     with contextlib.suppress(Exception):
         from tools.skills_tool import reset_skill_view_dedup
         reset_skill_view_dedup(task_id)
@@ -4331,7 +4329,7 @@ def _compress_context_via_codex_app_server(
         # armed until a later turn; minimal test engines may lack update_from_response.
         if hasattr(agent.context_compressor, "update_from_response"):
             _record_codex_app_server_usage(agent, result, messages=messages)
-    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "", skills=False)
+    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "")
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s", _sid,
         getattr(result, "thread_id", None) or "", getattr(result, "turn_id", None) or "",
