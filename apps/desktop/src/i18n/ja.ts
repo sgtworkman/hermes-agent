@@ -3035,9 +3035,13 @@ export const ja = defineLocale({
     maybeLater: '後で',
     moreChanges: count => `さらに ${count} 件の変更が含まれています。`,
     manualTitle: 'ターミナルから更新',
+    manualUnavailableTitle: 'ここからは更新できません',
     manualBody:
       'Hermes をコマンドラインからインストールしたため、更新もそこで実行されます。これをターミナルに貼り付けてください:',
+    manualBodyBackend:
+      'Hermes バックエンドはこのアプリの外部で管理されています。ホストするサーバーで次のコマンドを実行してください:',
     manualPickedUp: 'Hermes は次回起動時に新しいバージョンを読み込みます。',
+    manualPickedUpBackend: 'バックエンドは更新完了後に新しいバージョンを読み込みます。',
     guiSkewTitle: 'デスクトップアプリを更新してください',
     guiSkewBody:
       'バックエンドは更新されましたが、このデスクトップアプリのパッケージは変更されていません。一致させるために Hermes デスクトップアプリ（AppImage / .deb / .rpm）を更新または再インストールしてください。',

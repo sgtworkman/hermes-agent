@@ -4609,9 +4609,12 @@ export const frOverrides = {
     moreChanges: count =>
       `+ ${count} ${count === 1 ? 'changement supplémentaire inclus' : 'changements supplémentaires inclus'}.`,
     manualTitle: 'Mise à jour depuis votre terminal',
+    manualUnavailableTitle: 'Mise à jour impossible ici',
     manualBody:
       "Vous avez installé Hermes depuis la ligne de commande, les mises à jour s'y effectuent donc aussi. Collez ceci dans votre terminal :",
     manualPickedUp: 'Hermes prendra en compte la nouvelle version au prochain lancement.',
+    manualBodyBackend: 'Le backend Hermes est géré en dehors de cette app. Exécutez ceci sur le serveur qui l’héberge :',
+    manualPickedUpBackend: 'Le backend chargera la nouvelle version une fois la mise à jour terminée.',
     guiSkewTitle: "Mettre à jour l'application de bureau",
     guiSkewBody:
       "Le backend a été mis à jour, mais ce package d'application de bureau ne l'a pas été. Mettez à jour ou réinstallez l'application de bureau Hermes (votre AppImage / .deb / .rpm) pour qu'elle corresponde.",
