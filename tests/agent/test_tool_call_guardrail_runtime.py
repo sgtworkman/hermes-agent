@@ -423,34 +423,46 @@ def test_read_only_tool_may_quote_current_context_prune_marker():
     dispatch.assert_called_once()
 
 
-def test_default_run_conversation_warns_without_guardrail_halt():
+def test_default_run_conversation_allows_one_no_effect_retry_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}
-    responses = [
-        _mock_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[_mock_tool_call("web_search", json.dumps(same_args), f"c{i}")],
-        )
-        for i in range(1, 4)
-    ]
+    # Each of the three searches is followed by one safe retry. The returned
+    # NO_EFFECT payload does not indicate an external side effect or a failed
+    # tool call, so the retry must not turn into a guardrail halt.
+    responses = []
+    for search_index in range(1, 4):
+        for attempt in range(1, 3):
+            responses.append(_mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(
+                    "web_search", json.dumps(same_args), f"c{search_index}-{attempt}"
+                )],
+            ))
     responses.append(_mock_response(content="done", finish_reason="stop", tool_calls=None))
     agent.client.chat.completions.create.side_effect = responses
+    no_effect_result = {"ok": False, "result": "NO_EFFECT:..."}
 
     with (
-        patch("model_tools.handle_function_call", return_value=json.dumps({"error": "boom"})) as mock_hfc,
+        patch("model_tools.handle_function_call", return_value=json.dumps(no_effect_result)) as mock_hfc,
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
     ):
         result = agent.run_conversation("search repeatedly")
 
-    assert mock_hfc.call_count == 3
+    assert mock_hfc.call_count == 6
+    assert [call.kwargs["tool_call_id"] for call in mock_hfc.call_args_list] == [
+        f"c{search_index}-{attempt}"
+        for search_index in range(1, 4)
+        for attempt in range(1, 3)
+    ]
     assert result["turn_exit_reason"].startswith("text_response")
     assert "guardrail" not in result
     assert result["final_response"] == "done"
     tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
-    assert any("repeated_exact_failure_warning" in content for content in tool_contents)
+    assert len(tool_contents) == 6
+    assert all("NO_EFFECT:..." in content for content in tool_contents)
 
 
 
