@@ -2,6 +2,7 @@
 interpolation, hidden-whitespace and suspicious-entry filtering, the filtered
 subprocess env, command resolution, the cached-npx binary shortcut and the shared stderr log."""
 
+import codecs
 import json
 import logging
 import os
@@ -57,6 +58,39 @@ def _close_mcp_stderr_logs(*, scope: Optional[str] = None) -> None:
                 fh.close()
             except OSError:
                 logger.warning("Could not close MCP stderr log for %s", key, exc_info=True)
+
+
+class _StderrTee:
+    """A stdio child's stderr, copied into the shared log as it arrives while the last few KB stay
+    readable, so a server that dies at startup can say why on the MCP status surfaces instead of only in
+    the log (#124264). ``sink`` is handed to the child; ``close()`` returns the captured tail."""
+
+    _TAIL_BYTES = 16384
+
+    def __init__(self, log_fh: Any):
+        read_fd, write_fd = os.pipe()
+        self.sink = os.fdopen(write_fd, "wb", buffering=0)
+        self._log, self._tail = log_fh, bytearray()
+        self._reader = threading.Thread(target=self._pump, args=(read_fd,), name="mcp-stderr", daemon=True)
+        self._reader.start()
+
+    def _pump(self, read_fd: int) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        with os.fdopen(read_fd, "rb", buffering=0) as source:
+            while chunk := source.read(65536):
+                self._tail = (self._tail + chunk)[-self._TAIL_BYTES:]
+                try:
+                    self._log.write(decoder.decode(chunk))
+                    self._log.flush()
+                except (OSError, ValueError):  # log closed at shutdown: keep draining the child
+                    pass
+
+    def close(self, timeout: float = 2.0) -> str:
+        """Close our write end and give the reader *timeout* to drain (a surviving grandchild can keep
+        the pipe open); the tail read so far."""
+        self.sink.close()
+        self._reader.join(timeout)
+        return self._tail.decode("utf-8", errors="replace")
 
 
 def _write_stderr_log_header(server_name: str) -> None:
