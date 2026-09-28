@@ -31,7 +31,9 @@ _PRE_UPDATE_SNAPSHOT_KEEP = 1
 
 # Per-file cap for the quick snapshot (larger files skipped with a warning): it protects
 # small hard-to-regenerate state, not a multi-GB state.db (24 GB cost ~60s + 24 GB/update).
-_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE = 1 << 30  # 1 GiB
+# Local carry (Workman): raised 1 GiB -> 4 GiB so this box's 1.3 GB exec-profile state.db
+# (conversation history, not regenerable) rides along; cost is ~4s per update at this size.
+_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE = 1 << 32  # 4 GiB
 
 #: Reinstalling through the official installer swaps in a Python whose SQLite is safe; the
 #: one-liner differs per OS (mirrors ``uninstall._REINSTALL_HINT``). windows -> command
