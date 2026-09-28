@@ -152,6 +152,14 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    claim_failed: list[str] = field(default_factory=list)
+    """Ready/review task ids whose atomic claim lost this tick (another
+    dispatcher raced it, or the row left ``ready`` between read and claim).
+    Nothing is wrong with the card — the next tick retries. Bucketed so a
+    zero-spawn tick is never indistinguishable from a healthy idle one."""
+    spawn_deferred: Optional[str] = None
+    """Tick-level concurrency hold that suppressed every spawn attempt this
+    tick (e.g. ``"max_spawn: running 4 >= cap 4"``). Previously silent."""
 
 
 def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
@@ -166,6 +174,7 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
     """
     counts: dict[str, int] = {}
     pressure: Optional[str] = None
+    deferred: list[str] = []
     for res in results:
         if res is None:
             continue
@@ -177,9 +186,14 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
+        if res.claim_failed:
+            counts["claim_failed"] = counts.get("claim_failed", 0) + len(res.claim_failed)
+        if res.spawn_deferred:
+            deferred.append(res.spawn_deferred)
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     if pressure:
         parts.append(f"memory_pressure={pressure}")
+    parts.extend(f"spawn_deferred[{item}]" for item in deferred)
     return ", ".join(parts)
 
 
@@ -2076,6 +2090,7 @@ def _dispatch_lane_task(
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
     claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
     if claimed is None:
+        result.claim_failed.append(task_id)
         return False
     try:
         resolved_branch_name = None
@@ -2210,12 +2225,14 @@ def _tick_spawn_budget(
     # Both ready and review loops consume from the same budget.
     if max_spawn is not None:
         if running_count >= max_spawn:
+            result.spawn_deferred = f"max_spawn: running {running_count} >= cap {max_spawn}"
             return False, None
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            result.spawn_deferred = f"max_in_progress: running {total_running} >= cap {max_in_progress}"
             return False, None
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
@@ -2467,9 +2484,46 @@ def _rotate_worker_log(
         pass
 
 
+def _module_bootstrap_argv(repo_root: str) -> list[str]:
+    """Self-bootstrapping ``-c`` argv mirroring the launcher shim.
+
+    A bare ``-m hermes_cli.main`` is only import-safe inside THIS process: the
+    repo root reaches ``sys.path`` via the launcher's injected path, not via an
+    installed package, so a child started from cron / launchd / a kanban
+    workspace with a scrubbed environment dies with ``ModuleNotFoundError: No
+    module named 'hermes_cli'``. The bootstrap re-inserts the repo root
+    explicitly (same shape as ``.hermes/bin/hermes``).
+    """
+    bootstrap = (
+        "import os, re, sys\n"
+        "os.environ.pop('PYTHONHOME', None)\n"
+        "os.environ.pop('PYTHONPATH', None)\n"
+        f"sys.path.insert(0, {repo_root!r})\n"
+        "from hermes_constants import get_default_hermes_root\n"
+        "os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or str(get_default_hermes_root())\n"
+        "import hermes_bootstrap\n"
+        "from hermes_cli.main import main\n"
+        "sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        "sys.exit(main())\n"
+    )
+    return [sys.executable, "-I", "-c", bootstrap]
+
+
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
+    console-script target — there is no top-level ``hermes`` package).
+
+    The child cannot inherit this process's launcher-injected ``sys.path``,
+    so prefer the self-bootstrapping ``-c`` form; keep the legacy ``-m`` form
+    as the last resort when the repo root cannot be located.
+    """
+    try:
+        import hermes_cli  # noqa: PLC0415 — local import keeps module import cheap
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(hermes_cli.__file__)))
+        if os.path.isfile(os.path.join(repo_root, "hermes_cli", "main.py")):
+            return _module_bootstrap_argv(repo_root)
+    except Exception:
+        pass
     return [sys.executable, "-m", "hermes_cli.main"]
 
 

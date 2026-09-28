@@ -110,6 +110,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "reason": reason}
                 for (tid, reason) in res.respawn_guarded
             ],
+            "claim_failed": res.claim_failed,
+            "spawn_deferred": res.spawn_deferred,
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
@@ -148,6 +150,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
+    if res.claim_failed:
+        print(f"Claim raced (retried next tick): {', '.join(res.claim_failed)}")
+    if res.spawn_deferred:
+        print(f"Deferred (concurrency budget): {res.spawn_deferred}")
     if res.rate_limited:
         print(f"Rate-limited (released to ready, no failure counted): {', '.join(res.rate_limited)}")
     if res.skipped_locked:
@@ -239,13 +245,21 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         did_work = (
             res.reclaimed or res.crashed or res.timed_out or res.promoted
             or res.spawned or res.auto_blocked or res.stale
+            or res.claim_failed or res.spawn_deferred or res.respawn_guarded
         )
         if did_work:
+            extra = ""
+            if res.respawn_guarded:
+                extra += f" guarded={len(res.respawn_guarded)}"
+            if res.claim_failed:
+                extra += f" claim_failed={len(res.claim_failed)}"
+            if res.spawn_deferred:
+                extra += f" deferred=[{res.spawn_deferred}]"
             print(
                 f"[{_fmt_ts(int(time.time()))}] reclaimed={res.reclaimed} "
                 f"crashed={len(res.crashed)} timed_out={len(res.timed_out)} stale={len(res.stale)} "
                 f"promoted={res.promoted} spawned={len(res.spawned)} "
-                f"auto_blocked={len(res.auto_blocked)}",
+                f"auto_blocked={len(res.auto_blocked)}{extra}",
                 flush=True,
             )
 

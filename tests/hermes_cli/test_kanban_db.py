@@ -1577,8 +1577,10 @@ def test_connect_heals_reduced_tasks_schema_seeded_by_external_harness(kanban_ho
 
 def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     """A `hermes` on PATH must not shadow the running install (#111569):
-    the module argv wins whenever ``hermes_cli`` is importable; only an
+    the interpreter-bound argv wins whenever ``hermes_cli`` is importable
+    (self-bootstrapping so scrubbed children can import it); only an
     explicit ``$HERMES_BIN`` overrides it."""
+    import os
     import shutil
     import sys
     from hermes_cli import kanban_db_dispatch as kbd
@@ -1586,7 +1588,20 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     monkeypatch.delenv("HERMES_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/tmp/planted/hermes")
     monkeypatch.setattr(kbd, "_safe_which_no_cwd", lambda name: "/tmp/planted/hermes")
-    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+    argv = kbd._resolve_hermes_argv()
+    assert "/tmp/planted/hermes" not in argv  # PATH shim never wins
+    assert argv[0] == sys.executable
+    assert argv == kbd._module_hermes_argv()
+    if argv[1:2] == ["-m"]:
+        # Legacy form is acceptable only when the repo root genuinely
+        # cannot be located (nothing to bootstrap from).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(kbd.__file__)))
+        assert not os.path.isfile(os.path.join(repo_root, "hermes_cli", "main.py"))
+    else:
+        # Self-bootstrapping form: repo root baked into the -c code so a
+        # scrubbed child (no PYTHONPATH, foreign cwd) can still import.
+        assert argv[1:3] == ["-I", "-c"], argv[:3]
+        assert "hermes_cli.main" in argv[3]
 
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes/bin/hermes")
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
