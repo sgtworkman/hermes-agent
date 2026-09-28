@@ -2167,6 +2167,14 @@ def apply_terminal_config_to_env(
     if not (config is not None or "backend" in raw_terminal_cfg):
         backend_sources = backend_sources[::-1]  # env wins when the file did not set backend
     terminal_backend = str(backend_sources[0] or backend_sources[1] or "")
+    # Whether docker_image is the user's choice (config.yaml key, or TERMINAL_DOCKER_IMAGE set before
+    # any bridge ran) or the shipped default. DockerEnvironment recreates a persisted container on
+    # image mismatch only for a pinned image; a default flip keeps the user's sandbox and asks.
+    # Children inherit both vars, so a launcher's verdict is kept unless the file pins it.
+    if should_override and "docker_image" in explicit_keys:
+        target["TERMINAL_DOCKER_IMAGE_PINNED"] = "1"
+    elif "TERMINAL_DOCKER_IMAGE_PINNED" not in target:
+        target["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if "TERMINAL_DOCKER_IMAGE" in target else "0"
 
     for cfg_key, env_var in TERMINAL_CONFIG_ENV_MAP.items():
         if cfg_key not in terminal_cfg:
@@ -2968,7 +2976,7 @@ def _show_terminal_section(config: Dict[str, Any]) -> None:
     print(f"  Timeout:      {terminal.get('timeout', 60)}s")
 
     configured = lambda *names: 'configured' if all(get_env_value(n) for n in names) else '(not set)'  # noqa: E731
-    default_img = 'nikolaik/python-nodejs:python3.14-nodejs22'
+    from hermes_cli.config_defaults import DEFAULT_SANDBOX_IMAGE as default_img
     backend_lines = {
         'docker': lambda: [f"  Docker image: {terminal.get('docker_image', default_img)}"],
         'singularity': lambda: [f"  Image:        {terminal.get('singularity_image', 'docker://' + default_img)}"],
@@ -4035,58 +4043,3 @@ def _inject_platform_plugin_env_vars() -> None:
 
 
 _inject_platform_plugin_env_vars()
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-
-def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
-    """Resolve the directory that holds the *running code* (the install tree).
-
-    This is the parent of ``hermes_cli/`` — i.e. the git checkout for source
-    installs, ``/opt/hermes`` inside the published image. It is a property of
-    the running interpreter, NOT of ``$HERMES_HOME``, which is why a
-    code-scoped stamp here is immune to two installs sharing one data
-    directory.
-    """
-    if project_root is not None:
-        return project_root
-    return Path(__file__).parent.parent.resolve()
-
-def stamp_install_method(method: str, project_root: Optional[Path] = None) -> None:
-    """Write the install method next to the running code (code-scoped stamp).
-
-    The stamp lives in the install tree (``<install tree>/.install_method``),
-    not in ``$HERMES_HOME``, so that two installs sharing one data directory
-    do not overwrite each other's marker. See ``detect_install_method`` for
-    the full rationale.
-
-    Best-effort: if the install tree is read-only (e.g. the immutable
-    ``/opt/hermes`` in the published image, which instead bakes the stamp at
-    build time) the write silently no-ops and detection falls back to its
-    other signals.
-    """
-    root = _install_method_project_root(project_root)
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-        (root / ".install_method").write_text(method + "\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'normalize_route_base_url': ('hermes_cli.route_identity', 'normalize_route_base_url'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    from hermes_cli.plugin_compat import warn_once
-    warn_once(__name__, name, *target)
-    return getattr(importlib.import_module(target[0]), target[1])
-# ---- END PLUGIN-COMPAT ----

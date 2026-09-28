@@ -16940,6 +16940,8 @@ def test_model_options_preserves_canonical_custom_row_after_agent_init(monkeypat
         "hermes_cli.auth.is_provider_explicitly_configured",
         lambda _slug: False,
     )
+    # A host signed in to Claude Code / Anthropic OAuth would otherwise keep the anthropic row.
+    monkeypatch.setattr("hermes_cli.inventory._anthropic_oauth_credentials_present", lambda: False)
     monkeypatch.setattr("hermes_cli.inventory._apply_pricing", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hermes_cli.inventory._apply_capabilities", lambda *_args, **_kwargs: None)
 
@@ -18863,6 +18865,40 @@ def test_session_save_writes_under_hermes_home_with_system_prompt(monkeypatch, t
     assert payload["session_start"] == "2026-01-01T12:00:00"
     assert payload["system_prompt"] == "You are Hermes."
     assert payload["messages"] == history
+
+
+
+def test_session_save_lands_in_the_sessions_own_profile_a_b_a(monkeypatch, tmp_path):
+    """/save writes under the SESSION's profile home, launch -> secondary -> launch under multiplexing:
+    the RPC runs unscoped, so get_hermes_home() alone names the launch profile (#125241)."""
+    from agent.secret_scope import set_multiplex_active
+    launch_home = tmp_path / ".hermes"
+    work_home = launch_home / "profiles" / "s6probe-work"
+    work_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+    set_multiplex_active(True)
+    parents = []
+    try:
+        for i, home in enumerate((None, work_home, None)):
+            sid = f"save-profile-sid-{i}"
+            server._sessions[sid] = {
+                "agent": types.SimpleNamespace(model="hermes-test", session_id="s1", session_start=None,
+                                               _cached_system_prompt=""),
+                "session_key": sid, "profile_home": str(home) if home else None,
+                "history": [{"role": "user", "content": "hi"}], "history_lock": threading.Lock(),
+            }
+            try:
+                resp = server._methods["session.save"]("1", {"session_id": sid})
+            finally:
+                server._sessions.pop(sid, None)
+            assert "result" in resp, resp
+            parents.append(Path(resp["result"]["file"]).parent)
+    finally:
+        set_multiplex_active(False)
+
+    saved = launch_home / "sessions" / "saved"
+    assert parents == [saved, work_home / "sessions" / "saved", saved]
+    assert len(list((work_home / "sessions" / "saved").glob("hermes_conversation_*.json"))) == 1
 
 
 def test_session_save_proxies_to_compute_host_history(monkeypatch):
@@ -22723,6 +22759,10 @@ def test_load_cfg_raw_sees_replacement_with_pinned_mtime_and_size(monkeypatch, t
     st = cfg.stat()
     other = tmp_path / "other.yaml"
     other.write_text("model:\n  default: aaaa-route\n", encoding="utf-8")
+    # ctime ticks at the kernel's coarse clock (~4 ms): an in-place rewrite inside the tick of the
+    # cached read leaves every stat field equal. Wait until the fs clock has passed that ctime.
+    while other.stat().st_ctime_ns <= st.st_ctime_ns:
+        os.utime(other)
     shutil.copy2(other, cfg)
     os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert server._load_cfg_raw()["model"]["default"] == "aaaa-route"
