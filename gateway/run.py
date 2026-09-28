@@ -2022,6 +2022,7 @@ def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
         "modal_image": "TERMINAL_MODAL_IMAGE",
         "daytona_image": "TERMINAL_DAYTONA_IMAGE",
         "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+        "vercel_image": "TERMINAL_VERCEL_IMAGE",
         "ssh_host": "TERMINAL_SSH_HOST",
         "ssh_user": "TERMINAL_SSH_USER",
         "ssh_port": "TERMINAL_SSH_PORT",
@@ -2727,6 +2728,8 @@ def _abandon_timed_out_gateway_turn(
             request_hard_interrupt(agent, _INTERRUPT_REASON_TIMEOUT, tool_reason=_INTERRUPT_TOOL_REASON_TIMEOUT)
         except Exception:
             logger.debug("Timed-out agent interrupt failed", exc_info=True)
+        from hermes_cli.observability.shared_metrics_process import record_watchdog_turn_abort
+        record_watchdog_turn_abort(agent)
 
     try:
         _reap_gateway_turn_processes(
@@ -5462,9 +5465,16 @@ def _claim_host_gateway_role(force: bool = False) -> None:
                        hr.describe(owner) if owner else "another process")
         return
     from gateway.host_attach import (
-        ATTACH_CHANNEL_WAIT_S, START, host_gateway, standalone_attach_decision,
+        ATTACH_CHANNEL_WAIT_S, START, host_gateway, launched_by_other_tenant, standalone_attach_decision,
     )
     from hermes_cli.profiles import profile_is_standalone
+    if owner is not None and launched_by_other_tenant(owner.home, get_hermes_home()):
+        # The lock is per OS user, so a second tenant root can never win it against the first:
+        # refusing 75 here would retry forever and its gateway would never start (#121352).
+        logger.warning(
+            "Another Hermes home's gateway owns this host (%s); starting this home's gateway beside it.",
+            hr.describe(owner))
+        return
     if profile_is_standalone(get_hermes_home()):
         # Recheck after losing the atomic lock: the pre-lock served set may be stale.
         live_owner = host_gateway(wait_for_channel=ATTACH_CHANNEL_WAIT_S)
@@ -6147,6 +6157,8 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
     def _mark_exited() -> None:
         # Single funnel every graceful exit passes through, so the next boot's unclean-death detector
         # fires only for genuine SIGKILL/OOM/VM deaths. Ownership-guarded against an old --replace life.
+        from hermes_cli.observability.shared_metrics_process import stamp_exit
+        stamp_exit("clean")  # the exit-metrics marker too: os._exit skips its atexit stamp (never raises)
         from gateway.lifecycle_ledger import mark_exited
         mark_exited(exit_code, reason="graceful_shutdown")
 
