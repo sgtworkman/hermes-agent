@@ -84,7 +84,7 @@ function runNpmCi(node, npm, args, { source, env }) {
 }
 
 /** Install the full requested workspace union in one strict, locked operation. */
-export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain }) {
+export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, refresh = false, nativeToolchain }) {
   source = resolve(source)
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error('Select at least one workspace; implicit all-workspace installation is not allowed')
@@ -135,7 +135,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     inputs.update(file).update('\0').update(existsSync(join(source, file)) ? readFileSync(join(source, file)) : '<missing>').update('\0')
   }
   const key = inputs.digest('hex')
-  if (reuse && completedInstallMatches({ source, receipt, hiddenLock, key, nativeKey })) {
+  if (reuse && !refresh && completedInstallMatches({ source, receipt, hiddenLock, key, nativeKey })) {
     console.log(`node-deps: reusing completed install (${selected.join(', ')})`)
     return { source, workspaces: selected }
   }
@@ -165,8 +165,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     source: { type: 'string' }, workspace: { type: 'string', multiple: true },
     reuse: { type: 'boolean', default: false },
     'no-install': { type: 'boolean', default: false },
+    refresh: { type: 'boolean', default: false },
     'native-toolchain': { type: 'string' },
   } })
   if (!values.source) throw new Error('--source is required')
-  prepareNodeDependencies({ source: values.source, workspaces: values.workspace, reuse: values.reuse, install: !values['no-install'], nativeToolchain: values['native-toolchain'] })
+  prepareNodeDependencies({ source: values.source, workspaces: values.workspace, reuse: values.reuse, install: !values['no-install'], refresh: values.refresh, nativeToolchain: values['native-toolchain'] })
 }

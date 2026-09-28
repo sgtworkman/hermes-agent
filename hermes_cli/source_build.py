@@ -1,10 +1,16 @@
 """Source launch/update composition over the shared JavaScript builders."""
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+# A product build can fail because a reused node_modules lost files to a later
+# partial install; these markers distinguish that from logic/compile failures.
+DEPENDENCY_FAILURE_MARKERS = ("ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND",
+                              "Cannot find package", "Cannot find module")
 
 
 def source_product_current(project_root: Path, product: str, out: Path) -> bool:
@@ -70,6 +76,18 @@ def prepare_source_dependencies(project_root: Path, workspaces: tuple[str, ...],
     )
 
 
+def refresh_source_dependencies(project_root: Path, workspaces: tuple[str, ...], *, env: dict) -> None:
+    """Reinstall the workspace union even when the reuse receipt still matches.
+
+    The receipt certifies the install that ran, never files a later partial
+    install damaged; a forced npm ci is the only reliable heal for that tree."""
+    run_source_script(
+        project_root, "scripts/build/node-deps.mjs", "--source", str(project_root), "--reuse", "--refresh",
+        *(arg for workspace in workspaces for arg in ("--workspace", workspace)), env=env,
+        label="Refreshing Node dependencies",
+    )
+
+
 def prepare_launch_dependencies(project_root: Path, *, env: dict) -> None:
     """A launch rebuild must not prune another installed source frontend."""
     from hermes_cli.main_desktop import _desktop_dist_exists, _desktop_packaged_executable
@@ -100,7 +118,8 @@ def source_frontends(project_root: Path) -> tuple[str, ...]:
 
 
 def build_update_products(project_root: Path, *, desktop: bool) -> None:
-    """Prepare the selected union once; a failed product aborts the update."""
+    """Prepare the selected union once; a dependency-shaped product failure earns
+    one forced dependency refresh and retry before it aborts the update."""
     # Both current updates and historical takeover reach this in a fresh target
     # interpreter, never in the updater's pre-sync import graph.
     from hermes_cli.main_install_repair import _install_configured_features_missing_deps
@@ -112,22 +131,34 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
         return
     env = source_build_env(explicit=True)
     workspaces = frontends + (("apps/desktop",) if desktop else ())
+
+    def build_once(label: str, build: Callable[[], object]) -> None:
+        # The reuse receipt cannot see files a later partial install damaged; a
+        # dependency-shaped load failure is the signal, one forced npm ci is the
+        # heal. Any other failure aborts the update as before.
+        try:
+            build()
+        except subprocess.CalledProcessError as exc:
+            if not any(marker in (exc.output or "") for marker in DEPENDENCY_FAILURE_MARKERS):
+                raise
+            publish_stage("Refreshing Node dependencies")
+            refresh_source_dependencies(project_root, workspaces, env=env)
+            publish_stage(label)
+            build()
+
     publish_stage("Updating Node dependencies")
     prepare_source_dependencies(project_root, workspaces, env=env, explicit=True)
     if "ui-tui" in frontends:
-        publish_stage("Building the TUI")
-        build_source_tui(project_root, env=env)
+        build_once("Building the TUI", lambda: build_source_tui(project_root, env=env))
     if "web" in frontends:
-        publish_stage("Building the web UI")
-        build_source_web(project_root, env=env)
+        build_once("Building the web UI", lambda: build_source_web(project_root, env=env))
     if desktop:
         from hermes_cli.main_desktop import _refresh_installed_desktop_apps, build_prepared_desktop
 
-        publish_stage("Building the desktop app")
-        build_prepared_desktop(
+        build_once("Building the desktop app", lambda: build_prepared_desktop(
             project_root / "apps/desktop", source_mode=False,
             npm=shutil.which("npm", path=env["PATH"]), env=env, icons=project_root,
-        )
+        ))
         # A current release/ can still sit beside a stale installed copy (an earlier
         # update rebuilt but never installed); healing must not wait for the next build.
         _refresh_installed_desktop_apps(project_root / "apps/desktop")

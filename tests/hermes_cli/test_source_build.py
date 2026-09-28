@@ -308,3 +308,46 @@ def test_module_cli_builds_the_requested_products(source_products, desktop, monk
     assert acquired == ["npm"]
     assert (root / "hermes_cli/web_dist/index.html").is_file()
     assert (root / "apps/desktop/release/linux-unpacked/hermes").exists() == desktop
+
+
+@pytest.mark.platforms("posix")
+def test_dependency_load_failure_refreshes_once_and_rebuilds(source_products, monkeypatch):
+    """A load failure from a damaged reused tree earns one forced npm ci + retry."""
+    import hermes_cli.source_build as source_build
+
+    root, _ = source_products
+    attempts, refreshes = [], []
+    real_build_web = source_build.build_source_web
+
+    def flaky_build_web(project_root, *, env, icons=None):
+        attempts.append("web")
+        if len(attempts) == 1:
+            raise subprocess.CalledProcessError(
+                1, ["node", "web.mjs"],
+                output="Error: Cannot find package '/source/node_modules/fdir/index.js' "
+                       "imported from /source/node_modules/tinyglobby/dist/index.mjs")
+        return real_build_web(project_root, env=env, icons=icons)
+
+    monkeypatch.setattr(source_build, "build_source_web", flaky_build_web)
+    monkeypatch.setattr(source_build, "refresh_source_dependencies",
+                        lambda project_root, workspaces, *, env: refreshes.append(workspaces))
+
+    source_build.build_update_products(root, desktop=False)
+    assert attempts == ["web", "web"]
+    assert refreshes == [("ui-tui", "web")]
+    assert (root / "hermes_cli/web_dist/index.html").read_text() == "web"
+
+
+@pytest.mark.platforms("posix")
+def test_non_dependency_build_failure_aborts_without_refresh(source_products, monkeypatch):
+    """Fixture failures carry no dependency markers, so no reinstall is attempted."""
+    import hermes_cli.source_build as source_build
+
+    root, _ = source_products
+    refreshes = []
+    monkeypatch.setattr(source_build, "refresh_source_dependencies",
+                        lambda project_root, workspaces, *, env: refreshes.append(workspaces))
+    (root / "fail-web").touch()
+    with pytest.raises(subprocess.CalledProcessError):
+        source_build.build_update_products(root, desktop=False)
+    assert refreshes == []
