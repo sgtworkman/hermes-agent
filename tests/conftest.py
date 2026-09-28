@@ -1391,6 +1391,45 @@ def _capture_real_hermes_root() -> list[Path]:
 _REAL_HERMES_ROOT_CANDIDATES = _capture_real_hermes_root()
 
 
+@pytest.fixture
+def isolated_source_payload_manifest(monkeypatch, tmp_path):
+    """Redirect this checkout's sealed-payload lookup to a temporary manifest.
+
+    Some tests import entry-point modules lazily, after the per-test Hermes
+    home has been sandboxed. Since the maintained checkout itself lives under
+    the operator's real Hermes home, ``hermes_bootstrap`` would otherwise ask
+    PM to inspect ``PROJECT_ROOT.parent / manifest.json``. Keep the real-home
+    guard active and the source import path unchanged; only map that exact
+    checkout's payload-root lookup to a test-owned sealed-payload fixture.
+    Other project roots still use the real PM selector unchanged.
+    """
+    import json
+
+    import pm.environments as environments
+
+    source_root = PROJECT_ROOT.resolve()
+    payload_parent = tmp_path / "sealed-payload"
+    payload_root = payload_parent / source_root.name
+    payload_root.mkdir(parents=True)
+    payload_venv = payload_parent / "venv"
+    (payload_parent / "manifest.json").write_text(
+        json.dumps({"repo": payload_root.name, "venv": payload_venv.name}),
+        encoding="utf-8",
+    )
+    original_payload_venv = environments.payload_venv
+    probed_roots = []
+
+    def payload_venv_in_isolated_home(project_root):
+        root = Path(project_root).resolve()
+        if root == source_root:
+            probed_roots.append(root)
+            root = payload_root
+        return original_payload_venv(root)
+
+    monkeypatch.setattr(environments, "payload_venv", payload_venv_in_isolated_home)
+    return {"root": payload_root, "venv": payload_venv, "probed_roots": probed_roots}
+
+
 @pytest.fixture(autouse=True)
 def _forbid_real_hermes_home_io(monkeypatch, request):
     """Guard Python file/metadata/deletion calls and SQLite against real state.

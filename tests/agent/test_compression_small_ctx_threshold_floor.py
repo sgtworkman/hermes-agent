@@ -14,8 +14,12 @@ Covers the July 2026 compression tuning pass:
 
 from unittest.mock import patch
 
+import pytest
+
 import agent.context_compressor as cc
 from agent.context_compressor import ContextCompressor
+
+pytestmark = pytest.mark.usefixtures("isolated_source_payload_manifest")
 
 
 def _make(ctx: int, pct: float = 0.50) -> ContextCompressor:

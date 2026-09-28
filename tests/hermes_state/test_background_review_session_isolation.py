@@ -12,10 +12,14 @@ removes any such stray harness message (and the assistant reply that followed
 it) so a polluted session resumes clean.
 """
 
+import pytest
+
 from hermes_state import (
     _is_background_review_harness_message,
     _strip_background_review_harness,
 )
+
+pytestmark = pytest.mark.usefixtures("isolated_source_payload_manifest")
 
 
 class TestIsBackgroundReviewHarnessMessage:

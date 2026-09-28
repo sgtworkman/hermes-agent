@@ -172,6 +172,16 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     guard.check(PROJECT_ROOT / ".venv" / "bin" / "python", metadata=True)
     with pytest.raises(AssertionError, match="REAL hermes home"):
         guard.check(PROJECT_ROOT.parent / "config.yaml")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "manifest.json")
+
+
+def test_source_checkout_payload_lookup_uses_isolated_manifest(isolated_source_payload_manifest):
+    """Exercise PM's real manifest parser without reading the operator's home."""
+    from pm.environments import payload_venv
+
+    assert payload_venv(PROJECT_ROOT) == isolated_source_payload_manifest["venv"]
+    assert isolated_source_payload_manifest["probed_roots"] == [PROJECT_ROOT.resolve()]
 
 
 def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):

@@ -28,7 +28,7 @@ import pytest
 from hermes_cli import main as hermes_main
 import hermes_cli.main_web_build as main_web_build
 import hermes_cli.main_install_repair as main_install_repair
-from hermes_cli import update_cmd
+from hermes_cli import update_cmd, update_owning_install
 
 
 GIT = ["git"]
@@ -200,6 +200,52 @@ def test_print_update_completion_carries_branch_and_sha(
     assert "old-feature" in completion and short in completion
 
 
+def test_current_installed_checkout_is_not_retargeted():
+    """The test runner imports and updates this checkout, not a copied tree."""
+    from pathlib import Path
+
+    checkout = Path(hermes_main.__file__).resolve().parent.parent
+    assert checkout == Path(__file__).resolve().parents[2]
+    assert update_owning_install.owning_install_root(checkout) is None
+
+
+def test_retarget_uses_detected_install_cli_without_running_it(tmp_path, monkeypatch):
+    """A redirected interpreter still runs the owning install's update CLI."""
+    import sys
+    from pathlib import Path
+
+    owner = tmp_path / "install"
+    venv = owner / ".venv"
+    (owner / "hermes_cli").mkdir(parents=True)
+    (owner / "hermes_cli" / "main.py").write_text("# fixture owner\n")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base-python"))
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sys, "argv", ["hermes", "update", "--yes"])
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "other-source"))
+
+    calls = []
+
+    def record_call(command, *, cwd, env):
+        calls.append((command, cwd, env))
+        return 23
+
+    monkeypatch.setattr(update_owning_install.subprocess, "call", record_call)
+    assert update_owning_install.owning_install_root(checkout) == owner
+    with pytest.raises(SystemExit) as exc_info:
+        update_owning_install.retarget_to_owning_install(checkout)
+
+    assert exc_info.value.code == 23
+    assert len(calls) == 1
+    command, cwd, env = calls[0]
+    assert command == [str(venv / "bin" / "python"), "-m", "hermes_cli.main", "update", "--yes"]
+    assert cwd == owner
+    assert env["PYTHONPATH"] == str(owner)
+
+
 # ---------------------------------------------------------------------------
 # Full update flow: parked branch dirty/unmerged → SKIPPED, no false success
 # ---------------------------------------------------------------------------
@@ -212,6 +258,10 @@ def _patch_update_flow(monkeypatch, repo, run_real_git=True):
     repo (the whole point of these regressions).
     """
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", repo)
+    # These cases exercise a temporary clone's parked-branch behavior, not
+    # hermes update's installed-interpreter redirection. Leave the retarget
+    # wrapper live, but make this fixture clone explicitly non-owning.
+    monkeypatch.setattr(update_owning_install, "owning_install_root", lambda _root: None)
     monkeypatch.setattr(hermes_main, "_resolve_update_branch", lambda args: "main")
     monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)
     monkeypatch.setattr(main_install_repair, "_is_windows", lambda: False)

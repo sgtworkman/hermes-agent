@@ -25,6 +25,10 @@ separate.
 
 from unittest.mock import MagicMock
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("isolated_source_payload_manifest")
+
 # ---------------------------------------------------------------------------
 # parse_available_output_tokens_from_error — unit tests
 # ---------------------------------------------------------------------------

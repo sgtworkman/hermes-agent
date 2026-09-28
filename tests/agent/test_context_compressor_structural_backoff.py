@@ -10,7 +10,11 @@ session can still auto-compact after it grows real compressible material.
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent.context_compressor import ContextCompressor
+
+pytestmark = pytest.mark.usefixtures("isolated_source_payload_manifest")
 
 
 def _compressor(protect_first_n: int = 1) -> ContextCompressor:
