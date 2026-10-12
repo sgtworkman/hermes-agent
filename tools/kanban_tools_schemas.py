@@ -207,9 +207,11 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
     (
         "Park your current task in the 'scheduled' state while it waits for "
         "time or an external event. This ends the current run and makes the "
-        "task non-dispatchable until an orchestrator unblocks it; it does not "
-        "create a timer. Put any wake-up marker such as "
-        "``SCHEDULED_UNTIL=<ISO8601>`` in ``reason``."
+        "task non-dispatchable until it wakes. Include a wake time as "
+        "``SCHEDULED_UNTIL=<ISO8601>`` in ``reason`` — the dispatcher "
+        "auto-resumes the card to ready/todo on the first tick after that "
+        "time. Without a marker the card waits for a manual ``kanban "
+        "unblock``."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),

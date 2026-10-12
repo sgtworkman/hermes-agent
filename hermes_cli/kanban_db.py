@@ -26,6 +26,7 @@ import logging
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -3888,8 +3889,13 @@ def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
-    until ``unblock_task`` re-gates it."""
+    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable).
+
+    A ``SCHEDULED_UNTIL=<ISO8601>`` marker inside ``reason`` schedules the
+    wake: the dispatcher's reclaim phase auto-promotes the card via
+    ``wake_due_scheduled`` once the marker time passes (parent-gated).
+    Cards without a marker stay parked until ``unblock_task`` re-gates them.
+    """
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -3911,6 +3917,103 @@ def schedule_task(
         )
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
         return True
+
+
+# ``SCHEDULED_UNTIL=<ISO8601>`` wake marker. The kanban_schedule tool and
+# ``hermes kanban schedule`` both document putting it in the reason; the wake
+# parser reads it back from the latest ``scheduled`` event (#scheduled-wake).
+SCHEDULED_UNTIL_RE = re.compile(r"SCHEDULED_UNTIL=(\S+)", re.IGNORECASE)
+
+
+def parse_scheduled_until(reason: Optional[str]) -> Optional[int]:
+    """Extract ``SCHEDULED_UNTIL=<ISO8601>`` from a schedule reason.
+
+    Returns the wake time as epoch seconds, or ``None`` when the reason is
+    missing, carries no marker, or the marker does not parse as ISO8601 (a
+    malformed marker must never strand OR crash the dispatcher — it degrades
+    to "no timer, manual unblock only"). ``Z`` suffixes and naive timestamps
+    (read as local time) are both accepted.
+    """
+    if not reason:
+        return None
+    match = SCHEDULED_UNTIL_RE.search(str(reason))
+    if not match:
+        return None
+    raw = match.group(1).strip().strip("\"',.;)]}")
+    try:
+        parsed = datetime.fromisoformat(
+            raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+        )
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # Naive timestamp: interpret it in the host's local timezone, matching
+        # how a worker would have written "2026-10-12T09:30" informally.
+        parsed = parsed.astimezone()
+    return int(parsed.timestamp())
+
+
+def _scheduled_until_for_task(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """Wake epoch for a ``scheduled`` task from its latest ``scheduled`` event.
+
+    ``schedule_task`` records ``{"reason": ...}`` on that event; the marker
+    (when present) rides inside the reason text. No marker → ``None``.
+    """
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'scheduled' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return parse_scheduled_until(payload.get("reason"))
+
+
+def wake_due_scheduled(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
+    """Promote ``scheduled`` cards whose ``SCHEDULED_UNTIL`` wake time has passed.
+
+    The dispatcher previously parked ``scheduled`` cards forever — nothing in
+    the tick ever looked at them again, so a card waiting on time never woke
+    on its own (the scheduled-wake no-show defect). This restores the
+    documented "waiting on a known time delay" behavior: on every tick any
+    parked card with a parseable, already-passed ``SCHEDULED_UNTIL`` marker
+    re-gates to ``ready``/``todo`` (parent-gated) exactly like an unblock.
+
+    Cards parked WITHOUT a parseable marker intentionally stay parked —
+    nothing about them is time-driven, and ``kanban unblock`` remains their
+    manual escape hatch. Opens its own IMMEDIATE txn — call OUTSIDE any write
+    txn (the dispatcher's reclaim phase does). Returns the woken task ids.
+    """
+    now = int(time.time()) if now is None else int(now)
+    woken: list[str] = []
+    with write_txn(conn):
+        parked = conn.execute("SELECT id FROM tasks WHERE status = 'scheduled'").fetchall()
+        for parked_row in parked:
+            task_id = parked_row["id"]
+            until = _scheduled_until_for_task(conn, task_id)
+            if until is None or until > now:
+                continue
+            _reclaim_dangling_run(
+                conn, task_id, statuses=("scheduled",), now=now,
+                note="invariant recovery on scheduled wake",
+            )
+            new_status = _landing_status_after_parents(conn, task_id)
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, current_run_id = NULL "
+                "WHERE id = ? AND status = 'scheduled'",
+                (new_status, task_id),
+            )
+            if cur.rowcount != 1:
+                continue
+            _append_event(conn, task_id, "scheduled_wake", {"status": new_status, "until": until})
+            woken.append(task_id)
+    return woken
 
 
 # --- Worker context builder (what a spawned worker sees) ---

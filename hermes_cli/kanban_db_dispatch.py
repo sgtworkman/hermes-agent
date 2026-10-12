@@ -105,6 +105,10 @@ class DispatchResult:
 
     reclaimed: int = 0
     promoted: int = 0
+    scheduled_wakes: list[str] = field(default_factory=list)
+    """``scheduled`` task ids auto-woken this tick because their
+    ``SCHEDULED_UNTIL`` marker (parsed from the latest ``scheduled`` event)
+    has passed. See :func:`kanban_db.wake_due_scheduled`."""
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
     claim bookkeeping, dead/gone worker)."""
@@ -2202,6 +2206,10 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    # Scheduled-wake: promote parked ``scheduled`` cards whose wake time has
+    # passed BEFORE recompute_ready so a woken card is immediately dispatchable
+    # (or parent-gated to ``todo``) in the SAME tick — no 15-hour no-shows.
+    result.scheduled_wakes = _kb.wake_due_scheduled(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
