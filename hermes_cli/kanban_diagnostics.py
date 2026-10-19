@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import json
+import re
 import time
 
 
@@ -736,6 +737,37 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_invalid_scheduled_wake(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Expose invalid explicit wake markers while preserving manual gates."""
+    if _task_field(task, "status") != "scheduled":
+        return []
+    scheduled = [ev for ev in events if _event_kind(ev) == "scheduled"]
+    if not scheduled:
+        return []
+    # The dispatcher selects the newest event id, even across clock changes.
+    event = max(reversed(scheduled), key=lambda ev: _task_field(ev, "id", 0) or 0)
+    reason = _parse_payload(event).get("reason")
+    if not isinstance(reason, str) or not re.search(r"(?<!\S)SCHEDULED_UNTIL\s*=", reason, re.IGNORECASE):
+        return []
+    from hermes_cli.kanban_dispatch_lifecycle import scheduled_until_epoch
+
+    if scheduled_until_epoch(reason) is not None:
+        return []
+    task_id = _task_field(task, "id", "")
+    return [Diagnostic(
+        kind="scheduled_wake_invalid", severity="error",
+        title="Automatic resume disabled: scheduled wake needs a valid timezone-aware timestamp",
+        detail="The latest scheduled event has an invalid SCHEDULED_UNTIL marker. "
+               "A valid ISO 8601 timestamp with a timezone is required. Confirm the intended "
+               "wake time and existing execution gates before correcting it; this diagnostic "
+               "does not change the task or its schedule.",
+        actions=[_cli_hint("Review the current task and scheduling reason",
+                           f"hermes kanban show {task_id}", suggested=True)],
+        first_seen_at=_event_ts(event), last_seen_at=now,
+        data={"reason": reason, "schedule_event_id": _task_field(event, "id")},
+    )]
+
+
 # Order matters: earlier rules render first on severity ties.
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
@@ -748,6 +780,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_invalid_scheduled_wake,
 ]
 
 
