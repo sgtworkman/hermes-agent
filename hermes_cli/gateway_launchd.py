@@ -352,6 +352,7 @@ def _launchd_degrade_or_raise(exc: subprocess.CalledProcessError, what: str) -> 
 
 def generate_launchd_plist() -> str:
     from html import escape
+    from hermes_cli.gateway_service_environment import launchd_launcher_environment
     # Stable cwd anchor — never the volatile source checkout (same rot risk as systemd's WorkingDirectory).
     working_dir = _gw()._stable_service_working_dir()
     hermes_home = str(_gw().get_hermes_home().resolve())
@@ -412,7 +413,7 @@ def generate_launchd_plist() -> str:
 
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
-        <key>HERMES_SUPERVISED_CHILD</key>
+{launchd_launcher_environment(_gw().PROJECT_ROOT)}        <key>HERMES_SUPERVISED_CHILD</key>
         <string>1</string>
     </dict>
 

@@ -57,6 +57,9 @@ def source_launch(tmp_path, monkeypatch, isolated_python):
 
     root = tmp_path / "source with spaces"
     root.mkdir()
+    manager_root = tmp_path / "pm-manager"
+    manager_root.mkdir()
+    monkeypatch.setattr(paths, "repo_root", lambda: manager_root)
     (root / ".git").mkdir()
     (root / "install-stamp.json").write_text(
         json.dumps({"updateMechanism": "self"}), encoding="utf-8",

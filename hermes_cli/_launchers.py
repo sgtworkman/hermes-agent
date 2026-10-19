@@ -83,6 +83,19 @@ def print_runtime_command(repo_root: Path, argv: list[str]) -> None:
     print(json.dumps(runtime_command(repo_root, args, module=options.module)))
 
 
+def installation_cli_path(repo_root: Path) -> Path | None:
+    """Published CLI for this install; external runtimes keep their interpreter."""
+    from pm.environments import _payload_hermes_command
+
+    root = Path(repo_root).resolve()
+    payload = _payload_hermes_command(root)
+    if payload is not None:
+        return payload
+    if resolve_store_python(root) is not None:
+        return root / ".hermes" / "bin" / "hermes"
+    return None
+
+
 def installation_command(repo_root: Path, args=(), *, module: str = "hermes_cli.main",
                          python: str | Path | None = None, home: str | Path | None = None) -> list[str]:
     """Persist a source launcher, never the versioned tool it currently uses.
@@ -92,10 +105,11 @@ def installation_command(repo_root: Path, args=(), *, module: str = "hermes_cli.
     the managed Python pin changes.
     """
     root = Path(repo_root)
-    if resolve_store_python(root) is None:
+    command = installation_cli_path(root)
+    if command is None:
         return runtime_command(root, args, module=module, python=python, home=home)
     prefix = [] if module == "hermes_cli.main" else ["--run-module", module]
-    return [str(root / ".hermes" / "bin" / "hermes"), *prefix, *args]
+    return [str(command), *prefix, *args]
 
 #: Launcher command names — keep in lockstep with scripts/install.ps1
 #: Publish-UserCommand and hermes_cli/_install_repair.py.
