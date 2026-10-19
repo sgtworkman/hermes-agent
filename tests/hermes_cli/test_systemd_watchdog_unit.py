@@ -8,7 +8,8 @@ from hermes_cli import gateway as gateway_cli
 
 
 
-def test_positive_watchdog_config_generates_notify_unit(monkeypatch):
+def test_positive_watchdog_config_generates_notify_unit(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path / "hermes-agent")
     monkeypatch.setattr(
         gateway_cli,
         "load_gateway_config",
@@ -28,6 +29,7 @@ def test_positive_watchdog_config_generates_notify_unit(monkeypatch):
 
 
 def test_system_unit_reads_watchdog_from_target_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path / "hermes-agent")
     caller_home = tmp_path / "caller"
     target_home = tmp_path / "target"
     caller_home.mkdir()

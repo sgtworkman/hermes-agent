@@ -3154,11 +3154,6 @@ def _append_node_dir_for_service(path_entries: list[str], hermes_root: Path | No
             path_entries.append(entry)
 
 
-def _systemd_command(argv: list[str]) -> str:
-    """Quote argv for systemd, including its non-shell specifier expansion."""
-    return " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"')
-                    .replace("%", "%%").replace("$", "$$") + '"' for part in argv)
-
 
 def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None = None) -> None:
     """Publish the source command before a service definition references it."""
@@ -3194,6 +3189,7 @@ def _prepare_service_launcher(*, system: bool = False, run_as_user: str | None =
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
     from hermes_cli._launchers import installation_command
+    from hermes_cli.gateway_service_environment import systemd_command, systemd_launcher_environment
 
     python_path = get_python_path()
     working_dir = _stable_service_working_dir()
@@ -3268,12 +3264,12 @@ Wants=network-online.target
 
 [Service]
 Type={systemd_type}
-{systemd_watchdog_directives}{identity_lines}ExecStart={_systemd_command(start)}
+{systemd_watchdog_directives}{identity_lines}ExecStart={systemd_command(start)}
 WorkingDirectory={working_dir}
 {env_lines}Environment="PATH={sane_path}"
 
 Environment="HERMES_HOME={hermes_home}"
-Environment="HERMES_SUPERVISED_CHILD=1"
+{systemd_launcher_environment(project_root)}Environment="HERMES_SUPERVISED_CHILD=1"
 Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
@@ -3282,8 +3278,8 @@ RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
 ExecReload=/bin/kill -USR1 $MAINPID
-ExecStop=-{_systemd_command(stop_mark)}
-ExecStopPost=-{_systemd_command(cleanup)}
+ExecStop=-{systemd_command(stop_mark)}
+ExecStopPost=-{systemd_command(cleanup)}
 TimeoutStopSec={restart_timeout}
 StandardOutput=journal
 StandardError=journal
