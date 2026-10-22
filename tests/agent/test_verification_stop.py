@@ -166,3 +166,69 @@ def test_mixed_doc_and_code_edit_still_nudges(tmp_path, monkeypatch):
     # The doc path is filtered out of the reported set; the code path remains.
     assert code in nudge
     assert doc not in nudge
+
+
+# ---------------------------------------------------------------------------
+# t_841dca67 REPRO 2: the nudge withheld the composed answer (held as
+# pending_verification_response) and only asked to "summarize what passed", so the
+# follow-up turn replaced the business result with a test report. The instruction
+# must demand the completed work back, with verification as one line at most.
+# ---------------------------------------------------------------------------
+
+def test_no_suite_nudge_requires_restoring_the_withheld_answer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    _node_project(tmp_path)
+    changed = str(tmp_path / "src" / "app.ts")
+    mark_workspace_edited(session_id="s1", cwd=tmp_path, paths=[changed])
+
+    nudge = build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed])
+
+    assert nudge is not None
+    assert "withheld" in nudge
+    assert "never replaces it" in nudge
+    assert "Restore that answer in full" in nudge
+    assert "reports only the verification outcome is an incomplete answer" in nudge
+
+
+def test_suite_nudge_also_requires_restoring_the_withheld_answer(tmp_path, monkeypatch):
+    """A workspace WITH canonical commands must carry the same restoration rule."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    changed = str(tmp_path / "src" / "app.ts")
+    monkeypatch.setattr(
+        "agent.verification_stop._verification_snapshot",
+        lambda **_kwargs: (
+            {"status": "unverified"},
+            {"root": str(tmp_path), "verifyCommands": ["pnpm test"]},
+        ),
+    )
+
+    nudge = build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed])
+
+    assert nudge is not None
+    assert "`pnpm test`" in nudge
+    assert "Restore that answer in full" in nudge
+
+
+def test_no_suite_nudge_names_the_managed_scratch_root(tmp_path, monkeypatch):
+    """The instruction must point at a directory the ledger's classifier actually accepts."""
+    from hermes_constants import get_scratch_dir
+    from agent.verification_evidence import _is_temp_script_path
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    # macOS shape: the OS temp root is somewhere else entirely.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "os-temp"))
+    (tmp_path / "os-temp").mkdir()
+
+    nudge = build_verify_on_stop_nudge(
+        session_id="s1", changed_paths=[str(project / "src" / "app.ts")]
+    )
+
+    assert nudge is not None
+    scratch = get_scratch_dir(prune=False)
+    assert str(scratch) in nudge
+    # The advertised location must pass the same gate the classifier applies.
+    probe = scratch / "hermes-verify-advertised.py"
+    assert _is_temp_script_path(str(probe), project) is True

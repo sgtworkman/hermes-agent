@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_scratch_dir
 
 
 _DB_LOCK = threading.Lock()
@@ -302,13 +302,53 @@ def _is_under(token: str, base: str | Path | None) -> bool:
         return False
 
 
+def ad_hoc_verify_roots() -> list[Path]:
+    """Directories a legitimate ad-hoc verify script may live in, resolved.
+
+    The OS temp root (:func:`tempfile.gettempdir`) is the classic location, but Hermes
+    points ``TMPDIR`` at ``<HERMES_HOME>/cache/scratch`` (:func:`get_scratch_dir`) and the
+    system prompt tells the agent to write probes there — so a probe run under the managed
+    scratch dir is exactly as legitimate as one under the OS temp dir. A host that keeps a
+    user/OS ``TMPDIR`` (macOS ``/var/folders``) leaves ``gettempdir()`` outside the scratch
+    dir, and recognizing only ``gettempdir()`` rejected every scratch-dir probe.
+
+    A scratch dir that cannot be resolved is simply absent; the OS temp root still applies.
+    """
+    roots: list[Path] = []
+    for raw in (tempfile.gettempdir(), _managed_scratch_root()):
+        if not raw:
+            continue
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _managed_scratch_root() -> Optional[Path]:
+    """``<HERMES_HOME>/cache/scratch`` for the active profile, or None when unresolvable.
+
+    Never raises: an unwritable/undeterminable home must not turn a probe classification
+    into a crash, and a missing scratch dir must not exempt arbitrary repository paths.
+    """
+    try:
+        return get_scratch_dir(prune=False)
+    except (OSError, RuntimeError):
+        return None
+
+
 def _is_temp_script_path(token: str, root: str | Path | None) -> bool:
-    """An ad-hoc verify script: prefixed name, under the temp dir, outside the repo."""
+    """An ad-hoc verify script: prefixed name, under a sanctioned temp/scratch dir, outside the repo."""
     try:
         name = Path(token).expanduser().name
     except Exception:
         return False
-    return name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) and _is_under(token, tempfile.gettempdir()) and not _is_under(token, root)
+    if not name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) or _is_under(token, root):
+        return False
+    return any(_is_under(token, temp_root) for temp_root in ad_hoc_verify_roots())
+
 
 
 def _is_interpreter_token(token: str) -> bool:

@@ -206,12 +206,18 @@ def build_verify_on_stop_nudge(
             "Read any failure, repair the code, and summarize what passed."
         )
     else:
-        temp_dir = os.path.realpath(tempfile.gettempdir())
+        # Name the same roots the ledger's ad-hoc classifier accepts (OS temp root plus the
+        # managed scratch dir the system prompt already points at), so an instruction-following
+        # probe can never land somewhere the gate then rejects.
+        from agent.verification_evidence import ad_hoc_verify_roots
+
+        roots = [os.path.realpath(str(p)) for p in ad_hoc_verify_roots()]
+        locations = " or ".join(f"`{p}`" for p in roots) or f"`{os.path.realpath(tempfile.gettempdir())}`"
         command_instruction = (
             "No canonical test/lint/build command was detected. Create a focused "
-            f"temporary verification script under `{temp_dir}` using an OS-safe "
-            "`tempfile` path with a `hermes-verify-` filename prefix, run it "
-            "against the changed behavior, clean it up when possible, and "
+            f"temporary verification script under {locations} (the managed scratch dir is "
+            "preferred) using an OS-safe `tempfile` path with a `hermes-verify-` filename "
+            "prefix, run it against the changed behavior, clean it up when possible, and "
             "summarize it explicitly as ad-hoc verification rather than suite "
             "green."
         )
@@ -222,7 +228,12 @@ def build_verify_on_stop_nudge(
         f"Verification status: {_status_detail(status)}\n\n"
         f"Changed paths:\n{_format_changed_paths(paths)}\n\n"
         f"{command_instruction} If verification is not possible, explain the "
-        "concrete blocker instead of claiming the work is fully verified."
+        "concrete blocker instead of claiming the work is fully verified.\n\n"
+        "Your previous answer was withheld to run this check. Verification SUPPLEMENTS the "
+        "work you already completed — it never replaces it. Restore that answer in full in "
+        "your next response: the completed task result, findings, and any remaining gaps or "
+        "limitations, followed by at most one concise line about this verification. A reply "
+        "that reports only the verification outcome is an incomplete answer."
         f"{addendum}]"
     )
 

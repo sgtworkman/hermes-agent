@@ -80,6 +80,51 @@ def test_verify_on_stop_preserves_composed_report_at_budget_limit(agent, monkeyp
     assert not result["messages"][1].get("_verification_stop_synthetic")
 
 
+def test_verify_nudge_keeps_business_result_visible_after_continuation(agent, tmp_path, monkeypatch):
+    """The real nudge must keep a completed business answer from becoming test-only output.
+
+    The fake model follows the nudge contract: if restoration is requested it returns the
+    business result; the pre-fix wording makes it return only verification. This exercises
+    the actual stop-gate builder and continuation path rather than patching the nudge text.
+    """
+    from agent.verification_evidence import mark_workspace_edited
+
+    agent.max_iterations = 2
+    agent.iteration_budget.max_total = 2
+    project = tmp_path / "business-project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    changed = project / "src" / "watch.py"
+    changed.parent.mkdir()
+    changed.write_text("print('watch')\n", encoding="utf-8")
+    mark_workspace_edited(session_id=agent.session_id, cwd=project, paths=[str(changed)])
+
+    calls = []
+    business_result = "Ohio findings: no new verified event; Indiana access remains a gap."
+
+    def model_call(api_kwargs):
+        calls.append(api_kwargs)
+        agent._turn_file_mutation_paths = {str(changed)}
+        if len(calls) == 1:
+            return _response(business_result)
+        nudge = str(api_kwargs["messages"][-1].get("content") or "")
+        return _response(
+            business_result if "Restore that answer in full" in nudge else "Fresh ad-hoc verification passed."
+        )
+
+    agent._interruptible_api_call = model_call
+    agent._handle_max_iterations = MagicMock(return_value="replacement summary")
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "1")
+
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+        result = agent.run_conversation("Run the watch and report findings and gaps.")
+
+    assert len(calls) == 2
+    assert result["final_response"] == business_result
+    assert "verification" not in result["final_response"].lower()
+    assert result["completed"] is False
+
+
 def test_pre_verify_preserves_composed_report_at_budget_limit(agent, monkeypatch):
     def model_call(_api_kwargs):
         agent._turn_file_mutation_paths = {"changed.py"}

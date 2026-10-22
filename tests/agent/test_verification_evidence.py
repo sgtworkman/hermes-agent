@@ -480,3 +480,169 @@ def test_windows_backslash_ad_hoc_script_path_is_matched(tmp_path, monkeypatch):
     assert result is not None, (
         "Windows backslash path should be matched via posix=False fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# Managed-scratch recognition (t_841dca67 REPRO 1). Hermes points TMPDIR at
+# <HERMES_HOME>/cache/scratch and the system prompt tells the agent to write probes
+# there, but a host keeping a user/OS TMPDIR (macOS /var/folders) left gettempdir()
+# outside scratch — so every scratch-dir probe classified as no evidence and the
+# workspace stayed "unverified" no matter how many times the passing script ran.
+# ---------------------------------------------------------------------------
+
+def _scratch_probe(tmp_path: Path, monkeypatch, name: str = "hermes-verify-sources.py") -> Path:
+    """Create a real prefixed probe under the ACTIVE profile's managed scratch dir."""
+    from hermes_constants import get_scratch_dir
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    entry = get_scratch_dir(prune=False) / "hermes-verify-scratchcase"
+    entry.mkdir(parents=True, exist_ok=True)
+    script = entry / name
+    script.write_text("print('ok')\n", encoding="utf-8")
+    return script
+
+
+def _split_roots(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A project root and an OS temp root that are siblings, never nested.
+
+    Nested roots would make ``os-temp`` live under the project, and the classifier's
+    "outside the repo" rule would (correctly) reject it — masking what is being tested.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    return project, os_temp
+
+
+@pytest.mark.parametrize(
+    "invocation", ["python3 {script}", "/usr/bin/env python3 {script}", "{script}"]
+)
+def test_managed_scratch_probe_is_recognized_as_ad_hoc_evidence(tmp_path, monkeypatch, invocation):
+    """A passing `hermes-verify-*` script under the managed scratch dir is ad-hoc evidence.
+
+    The OS temp root is deliberately moved away from the scratch dir so this is the
+    macOS/real-gateway shape (gettempdir() == /var/folders/..., scratch == <home>/cache/scratch).
+    """
+    project, _os_temp = _split_roots(tmp_path, monkeypatch)
+    script = _scratch_probe(tmp_path, monkeypatch)
+    try:
+        evidence = classify_verification_command(
+            invocation.format(script=script), cwd=project, session_id="s1", exit_code=0, output="ok"
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+    assert evidence.status == "passed"
+
+
+def test_os_temp_probe_still_recognized(tmp_path, monkeypatch):
+    """Green control: the classic OS-temp location must keep working."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    project, os_temp = _split_roots(tmp_path, monkeypatch)
+    script = os_temp / "hermes-verify-ostemp.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0, output="ok"
+    )
+    assert evidence is not None and evidence.status == "passed"
+
+
+def test_repo_probe_under_scratch_name_is_not_evidence(tmp_path, monkeypatch):
+    """Red control: the prefixed NAME alone never qualifies — a repo-resident script is rejected."""
+    _split_roots(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "package.json").write_text("{}", encoding="utf-8")
+    script = repo / "hermes-verify-sneaky.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    assert classify_verification_command(
+        f"python3 {script}", cwd=repo, session_id="s1", exit_code=0, output="ok"
+    ) is None
+
+
+def test_repo_probe_is_rejected_even_when_repo_sits_under_the_scratch_root(tmp_path, monkeypatch):
+    """Red control: "outside the repo" wins even when the repo itself lives under scratch."""
+    from hermes_constants import get_scratch_dir
+
+    _split_roots(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    repo = get_scratch_dir(prune=False) / "repo-under-scratch"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "package.json").write_text("{}", encoding="utf-8")
+    script = repo / "hermes-verify-inside-repo.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    assert classify_verification_command(
+        f"python3 {script}", cwd=repo, session_id="s1", exit_code=0, output="ok"
+    ) is None
+
+
+def test_non_temp_prefixed_script_is_not_evidence(tmp_path, monkeypatch):
+    """Red control: a prefixed script outside both sanctioned roots is not evidence."""
+    project, _os_temp = _split_roots(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    script = elsewhere / "hermes-verify-outside.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    assert classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0, output="ok"
+    ) is None
+
+
+def test_scratch_probe_nonzero_exit_is_failed_not_passed(tmp_path, monkeypatch):
+    """Red control: a scratch probe that FAILS must record `failed`, never `passed`."""
+    project, _os_temp = _split_roots(tmp_path, monkeypatch)
+    script = _scratch_probe(tmp_path, monkeypatch)
+    try:
+        evidence = classify_verification_command(
+            f"python3 {script}", cwd=project, session_id="s1", exit_code=1, output="boom"
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert evidence is not None
+    assert evidence.status == "failed"
+
+
+def test_non_interpreter_scratch_command_is_not_evidence(tmp_path, monkeypatch):
+    """Red control: merely naming the scratch script (rm/cat/chmod) proves nothing."""
+    project, _os_temp = _split_roots(tmp_path, monkeypatch)
+    script = _scratch_probe(tmp_path, monkeypatch)
+    try:
+        for command in (f"rm -f {script}", f"/usr/bin/cat {script}", f"/usr/bin/chmod +x {script}"):
+            assert classify_verification_command(
+                command, cwd=project, session_id="s1", exit_code=0
+            ) is None, command
+    finally:
+        script.unlink(missing_ok=True)
+
+
+def test_scratch_probe_clears_the_stop_loop(tmp_path, monkeypatch):
+    """End-to-end: a scratch probe pass leaves the workspace `passed`, so no nudge returns."""
+    project, _os_temp = _split_roots(tmp_path, monkeypatch)
+    changed = str(project / "src" / "app.ts")
+    script = _scratch_probe(tmp_path, monkeypatch)
+    # Edit first: evidence recorded after an edit is fresh for it, not stale.
+    mark_workspace_edited(session_id="s1", cwd=project, paths=[changed])
+    try:
+        record_terminal_result(
+            command=f"python3 {script}", cwd=project, session_id="s1", exit_code=0, output="ok"
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert verification_status(session_id="s1", cwd=project)["status"] == "passed"
+
+    from agent.verification_stop import build_verify_on_stop_nudge
+
+    assert build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed]) is None
