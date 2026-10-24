@@ -7,9 +7,9 @@
  *
  * Endpoints (matches gateway/platforms/whatsapp.py expectations):
  *   GET  /messages       - Long-poll for new incoming messages
- *   POST /send           - Send a message { chatId, message, replyTo? }
+ *   POST /send           - Send a message { chatId, message, replyTo?, mentions? }
  *   POST /edit           - Edit a sent message { chatId, messageId, message }
- *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName? }
+ *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName?, mentions? }
  *   POST /send-location  - Send location pin { chatId, latitude, longitude, name?, address? }
  *   POST /typing         - Send typing indicator { chatId }
  *   GET  /chat/:id       - Get chat info
@@ -30,20 +30,32 @@ import { randomBytes, createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
-import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import { matchesAllowedSender, matchesAllowedUser, matchesInboundWhatsAppGroup, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
 import {
+  addMentions,
   buildPollPayload,
+  createReconnectScheduler,
+  createVersionResolver,
+  installConsoleStamps,
   buildLocationPayload,
   buildTextSendPayload,
   createBoundedMessageStore,
+  createQuotedMediaCache,
   extractBridgeEvent,
+  getMessageContent,
+  inboundReadReceiptKeys,
   inferMediaType,
   mediaPayloadForFile,
+  normalizeWhatsAppId,
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
+  writeJsonLine,
 } from './bridge_helpers.js';
+
+// First statement: helpers capture console.log as a default at call time below.
+installConsoleStamps();
 
 // Parse CLI args
 const args = process.argv.slice(2);
@@ -75,6 +87,12 @@ const FORWARD_OWNER_MESSAGES =
   typeof process.env.WHATSAPP_FORWARD_OWNER_MESSAGES === 'string' &&
   ['1', 'true', 'yes', 'on'].includes(process.env.WHATSAPP_FORWARD_OWNER_MESSAGES.toLowerCase());
 
+const SEND_READ_RECEIPTS =
+  typeof process !== 'undefined' &&
+  process.env &&
+  typeof process.env.WHATSAPP_SEND_READ_RECEIPTS === 'string' &&
+  ['1', 'true', 'yes', 'on'].includes(process.env.WHATSAPP_SEND_READ_RECEIPTS.toLowerCase());
+
 const PORT = parseInt(getArg('port', '3000'), 10);
 const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.hermes', 'whatsapp', 'session'));
 // Cache directories: the Python gateway passes the profile-aware paths via
@@ -100,9 +118,15 @@ try {
     .slice(0, 16);
 } catch {}
 const PAIR_ONLY = args.includes('--pair-only');
+const PAIR_JSON = args.includes('--pair-json');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
+const WHATSAPP_DM_POLICY = String(process.env.WHATSAPP_DM_POLICY || 'open').trim().toLowerCase();
+const WHATSAPP_GROUP_POLICY = String(process.env.WHATSAPP_GROUP_POLICY || 'pairing').trim().toLowerCase();
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
-const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
+// Group authorization is by group JID, not by every participant's JID.  The
+// Python adapter still applies group policy and mention rules after intake.
+const GROUP_ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_GROUP_ALLOWED_USERS || '');
+const DEFAULT_REPLY_PREFIX = '☤ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
   : process.env.WHATSAPP_REPLY_PREFIX.replace(/\\n/g, '\n');
@@ -192,31 +216,21 @@ function trackSentMessageId(sent) {
   rememberSentId(sent?.key?.id);
 }
 
-function normalizeWhatsAppId(value) {
-  if (!value) return '';
-  return String(value).replace(':', '@');
+function redactWhatsAppId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const [userPart, domainPart = ''] = raw.split('@', 2);
+  const bare = userPart.split(':', 1)[0];
+  const digits = bare.replace(/\D/g, '');
+  const suffix = digits ? digits.slice(-4) : bare.slice(-4);
+  return `${suffix ? `…${suffix}` : '…'}${domainPart ? `@${domainPart}` : ''}`;
 }
 
-function getMessageContent(msg) {
-  const content = msg?.message || {};
-  if (content.ephemeralMessage?.message) return content.ephemeralMessage.message;
-  if (content.viewOnceMessage?.message) return content.viewOnceMessage.message;
-  if (content.viewOnceMessageV2?.message) return content.viewOnceMessageV2.message;
-  if (content.documentWithCaptionMessage?.message) return content.documentWithCaptionMessage.message;
-  if (content.templateMessage?.hydratedTemplate) return content.templateMessage.hydratedTemplate;
-  if (content.buttonsMessage) return content.buttonsMessage;
-  if (content.listMessage) return content.listMessage;
-  return content;
-}
-
-function getContextInfo(messageContent) {
-  if (!messageContent || typeof messageContent !== 'object') return {};
-  for (const value of Object.values(messageContent)) {
-    if (value && typeof value === 'object' && value.contextInfo) {
-      return value.contextInfo;
-    }
-  }
-  return {};
+function emitDebugEvent(payload) {
+  if (!WHATSAPP_DEBUG) return;
+  try {
+    writeJsonLine({ event: 'debug', ...payload });
+  } catch {}
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
@@ -253,6 +267,10 @@ const MAX_QUEUE_SIZE = 100;
 const recentlySentIds = createOutboundIdTracker(512);
 const recentlyProcessedPollUpdates = createOutboundIdTracker(512);
 const messageStore = createBoundedMessageStore(512);
+// Bounded cache of already-downloaded inbound media, so a later reply to an
+// uncaptioned photo/video/document/voice note can still surface the original
+// file — see createQuotedMediaCache's doc comment in bridge_helpers.js.
+const quotedMediaCache = createQuotedMediaCache(512);
 
 function normalizePollUpdateOptions(aggregation, pollUpdateMessage, meId) {
   const selected = [];
@@ -280,7 +298,7 @@ function pollAggregationSummary(aggregation) {
 function logPollUpdateDiagnostic({ sourcePath, pollId, pollCreation, pollUpdates, selectedOptions, aggregation }) {
   const firstUpdate = pollUpdates?.[0] || {};
   try {
-    console.log(JSON.stringify({
+    writeJsonLine({
       event: 'poll_update_decode',
       sourcePath,
       pollId: pollId || '',
@@ -289,7 +307,7 @@ function logPollUpdateDiagnostic({ sourcePath, pollId, pollCreation, pollUpdates
       hasVote: !!firstUpdate.vote,
       selectedOptionsLength: selectedOptions?.length || 0,
       aggregation: pollAggregationSummary(aggregation),
-    }));
+    });
   } catch {}
 }
 
@@ -309,7 +327,7 @@ function enqueuePollUpdateEvent({ key, update, selectedOptions, aggregation }) {
   // inject agent-visible messages on every vote.
   if (!pollId || !recentlySentIds.has(pollId)) {
     if (WHATSAPP_DEBUG) {
-      try { console.log(JSON.stringify({ event: 'ignored', reason: 'foreign_poll_update', pollId })); } catch {}
+      try { writeJsonLine({ event: 'ignored', reason: 'foreign_poll_update', pollId }); } catch {}
     }
     return;
   }
@@ -360,12 +378,22 @@ function rememberSentId(id) {
 let sock = null;
 let connectionState = 'disconnected';
 
+function emitPairEvent(event) {
+  if (!PAIR_JSON) return;
+  try {
+    writeJsonLine({ ts: Date.now(), ...event });
+  } catch {}
+}
+
+const scheduleReconnect = createReconnectScheduler(() => startSocket());
+const getWAVersion = createVersionResolver(fetchLatestBaileysVersion);
+
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  const version = await getWAVersion();
 
   sock = makeWASocket({
-    version,
+    ...(version ? { version } : {}),
     auth: state,
     logger,
     printQRInTerminal: false,
@@ -387,9 +415,14 @@ async function startSocket() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\nWaiting for scan...\n');
+      if (PAIR_JSON) {
+        emitPairEvent({ event: 'qr', qr });
+      } else {
+        console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
+        // The QR block is multi-line art; a stamp on its first row would skew it.
+        qrcode.generate(qr, { small: true }, (code) => process.stdout.write(`${code}\n`));
+        console.log('\nWaiting for scan...\n');
+      }
     }
 
     if (connection === 'close') {
@@ -397,22 +430,39 @@ async function startSocket() {
       connectionState = 'disconnected';
 
       if (reason === DisconnectReason.loggedOut) {
-        console.log('❌ Logged out. Delete session and restart to re-authenticate.');
+        emitPairEvent({ event: 'error', error: 'logged_out', reason });
+        if (!PAIR_JSON) {
+          console.log('❌ Logged out. Delete session and restart to re-authenticate.');
+        }
         process.exit(1);
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
-        if (reason === 515) {
-          console.log('↻ WhatsApp requested restart (code 515). Reconnecting...');
-        } else {
-          console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
+        emitPairEvent({ event: 'disconnected', reason });
+        if (!PAIR_JSON) {
+          if (reason === 515) {
+            console.log('↻ WhatsApp requested restart (code 515). Reconnecting...');
+          } else {
+            console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
+          }
         }
-        setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        scheduleReconnect(reason === 515 ? 1000 : 3000);
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
-      console.log('✅ WhatsApp connected!');
+      const connectedUser = sock?.user
+        ? {
+            id: sock.user.id || null,
+            name: sock.user.name || sock.user.verifiedName || null,
+          }
+        : null;
+      emitPairEvent({ event: 'connected', user: connectedUser });
+      if (!PAIR_JSON) {
+        console.log('✅ WhatsApp connected!');
+      }
       if (PAIR_ONLY) {
-        console.log('✅ Pairing complete. Credentials saved.');
+        if (!PAIR_JSON) {
+          console.log('✅ Pairing complete. Credentials saved.');
+        }
         // Give Baileys a moment to flush creds, then exit cleanly
         setTimeout(() => process.exit(0), 2000);
       }
@@ -484,24 +534,35 @@ async function startSocket() {
       if (!msg.message) continue;
 
       const chatId = msg.key.remoteJid;
-      if (WHATSAPP_DEBUG) {
-        try {
-          console.log(JSON.stringify({
-            event: 'upsert', type,
-            fromMe: !!msg.key.fromMe, chatId,
-            senderId: msg.key.participant || chatId,
-            messageKeys: Object.keys(msg.message || {}),
-          }));
-        } catch {}
-      }
       const senderId = msg.key.participant || chatId;
+      // Baileys v7 carries the other form of the sender here (group: key.participantAlt,
+      // DM: key.remoteJidAlt). A LID sender's phone twin makes a phone allowlist match with no
+      // lid-mapping file yet (#63415, #72529) and is the identity Python sees, so first
+      // contacts key the same session they will once the mapping exists.
+      const senderAltId = normalizeWhatsAppId(msg.key.participantAlt || msg.key.remoteJidAlt || '');
+      const resolvedSenderId = senderAltId.endsWith('@s.whatsapp.net') ? senderAltId : senderId;
       const isGroup = chatId.endsWith('@g.us');
-      const senderNumber = senderId.replace(/@.*/, '');
+      const senderNumber = resolvedSenderId.replace(/@.*/, '');
+      emitDebugEvent({
+        stage: 'upsert',
+        type,
+        fromMe: !!msg.key.fromMe,
+        chatId: redactWhatsAppId(chatId),
+        senderId: redactWhatsAppId(senderId),
+        messageKeys: Object.keys(msg.message || {}),
+      });
 
       // Handle fromMe messages based on mode
       let fromOwner = false;
       if (msg.key.fromMe) {
-        if (isGroup || chatId.includes('status')) continue;
+        if (isGroup || chatId.includes('status')) {
+          emitDebugEvent({
+            stage: 'ignored',
+            reason: isGroup ? 'from_me_group' : 'from_me_status',
+            chatId: redactWhatsAppId(chatId),
+          });
+          continue;
+        }
 
         if (WHATSAPP_MODE === 'bot') {
           // Bot mode: separate bot number. fromMe inbound is either
@@ -527,12 +588,12 @@ async function startSocket() {
           if (decision.action === 'drop_disabled') continue;
           if (decision.action === 'drop_allowlist') {
             try {
-              console.log(JSON.stringify({
+              writeJsonLine({
                 event: 'ignored',
                 reason: 'allowlist_mismatch_owner_chat',
                 chatId,
                 senderId,
-              }));
+              });
             } catch {}
             continue;
           }
@@ -546,7 +607,22 @@ async function startSocket() {
           const myLid = (sock.user?.lid || '').replace(/:.*@/, '@').replace(/@.*/, '');
           const chatNumber = chatId.replace(/@.*/, '');
           const isSelfChat = (myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid);
-          if (!isSelfChat) continue;
+          emitDebugEvent({
+            stage: 'self_chat_check',
+            matched: !!isSelfChat,
+            chatId: redactWhatsAppId(chatId),
+            accountId: redactWhatsAppId(sock.user?.id),
+            accountLid: redactWhatsAppId(sock.user?.lid),
+          });
+          if (!isSelfChat) {
+            emitDebugEvent({
+              stage: 'ignored',
+              reason: 'self_chat_mismatch',
+              chatId: redactWhatsAppId(chatId),
+              senderId: redactWhatsAppId(senderId),
+            });
+            continue;
+          }
         }
       }
 
@@ -558,23 +634,33 @@ async function startSocket() {
       if (!msg.key.fromMe) {
         if (WHATSAPP_MODE === 'self-chat') {
           try {
-            console.log(JSON.stringify({
+            writeJsonLine({
               event: 'ignored',
               reason: 'self_chat_mode_rejects_non_self',
               chatId,
               senderId,
-            }));
+            });
           } catch {}
           continue;
         }
-        if (!matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
+        const intakeAllowed = isGroup
+          ? matchesInboundWhatsAppGroup({
+              chatId,
+              groupPolicy: WHATSAPP_GROUP_POLICY,
+              groupAllowedUsers: GROUP_ALLOWED_USERS,
+              sessionDir: SESSION_DIR,
+            })
+          : WHATSAPP_DM_POLICY === 'pairing'
+            || matchesAllowedSender(senderId, senderAltId, ALLOWED_USERS, SESSION_DIR);
+        if (!intakeAllowed) {
           try {
-            console.log(JSON.stringify({
+            writeJsonLine({
               event: 'ignored',
-              reason: 'allowlist_mismatch',
+              reason: isGroup ? 'group_policy_rejected' : 'allowlist_mismatch',
               chatId,
               senderId,
-            }));
+              senderAltId,
+            });
           } catch {}
           continue;
         }
@@ -643,7 +729,7 @@ async function startSocket() {
       const event = await extractBridgeEvent({
         msg,
         chatId,
-        senderId,
+        senderId: resolvedSenderId,
         senderNumber,
         botIds,
         isGroup,
@@ -653,31 +739,56 @@ async function startSocket() {
           document: DOCUMENT_CACHE_DIR,
           audio: AUDIO_CACHE_DIR,
         },
+        lookupQuotedMedia: (quotedChatId, quotedMessageId) => quotedMediaCache.get(quotedChatId, quotedMessageId),
       });
       event.fromOwner = fromOwner;
 
       // Ignore Hermes' own reply messages in self-chat mode to avoid loops.
       if (msg.key.fromMe && ((REPLY_PREFIX && event.body.startsWith(REPLY_PREFIX)) || recentlySentIds.has(msg.key.id))) {
         if (WHATSAPP_DEBUG) {
-          try { console.log(JSON.stringify({ event: 'ignored', reason: 'agent_echo', chatId, messageId: msg.key.id })); } catch {}
+          emitDebugEvent({
+            stage: 'ignored',
+            reason: 'agent_echo',
+            chatId: redactWhatsAppId(chatId),
+            messageId: msg.key.id,
+          });
         }
         continue;
       }
 
-      // Skip empty messages
-      if (!event.body && !event.hasMedia) {
-        if (WHATSAPP_DEBUG) {
-          try { 
-            console.log(JSON.stringify({ event: 'ignored', reason: 'empty', chatId, messageKeys: Object.keys(msg.message || {}) })); 
-          } catch (err) {
-            console.error('Failed to log empty message event:', err);
-          }
-        }
+      // Skip empty messages (but not a bare quote-reply whose own text/media
+      // is empty when the quoted message resolved to cached media).
+      if (!event.body && !event.hasMedia && !event.quotedMediaUrls.length) {
+        emitDebugEvent({
+          stage: 'ignored',
+          reason: 'empty',
+          chatId: redactWhatsAppId(chatId),
+          messageKeys: Object.keys(msg.message || {}),
+        });
         continue;
       }
 
       messageStore.remember(msg);
+      // Remember this message's already-downloaded media/text so a later
+      // reply to it (even uncaptioned media) can resolve the original
+      // content instead of seeing only a stripped-down quoted-message stub.
+      quotedMediaCache.remember(chatId, msg.key.id, {
+        body: event.body,
+        hasMedia: event.hasMedia,
+        mediaType: event.mediaType,
+        mediaUrls: event.mediaUrls,
+      });
       messageQueue.push(event);
+      emitDebugEvent({
+        stage: 'queued',
+        chatId: redactWhatsAppId(chatId),
+        senderId: redactWhatsAppId(senderId),
+        fromOwner: !!fromOwner,
+        bodyLength: event.body.length,
+        hasMedia: event.hasMedia,
+        mediaType: event.mediaType,
+        queueLength: messageQueue.length,
+      });
       if (messageQueue.length > MAX_QUEUE_SIZE) {
         messageQueue.shift();
       }
@@ -732,7 +843,7 @@ app.post('/send', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, message, replyTo } = req.body;
+  const { chatId, message, replyTo, mentions } = req.body;
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
@@ -744,6 +855,7 @@ app.post('/send', async (req, res) => {
       const { content: payload, options } = buildTextSendPayload(chunks[i], {
         chatId,
         replyTo: i === 0 ? replyTo : undefined,
+        mentions: i === 0 ? mentions : undefined,
         messageStore,
       });
       const sent = await sendWithTimeout(chatId, payload, options);
@@ -805,7 +917,7 @@ app.post('/send-media', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, filePath, mediaType, caption, fileName } = req.body;
+  const { chatId, filePath, mediaType, caption, fileName, mentions } = req.body;
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
@@ -889,6 +1001,8 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
+    msgPayload = addMentions(msgPayload, mentions);
+
     const sent = await sendWithTimeout(chatId, msgPayload);
     trackSentMessageId(sent);
     messageStore.remember(sent);
@@ -961,6 +1075,30 @@ app.post('/typing', async (req, res) => {
   }
 });
 
+// Mark an inbound message as read only after the Python adapter has accepted
+// it through the authoritative DM/group/mention intake policy.
+app.post('/read', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected' });
+  }
+
+  const receiptKeys = inboundReadReceiptKeys({
+    key: req.body?.key,
+    enabled: SEND_READ_RECEIPTS,
+  });
+  if (receiptKeys.length === 0) {
+    return res.json({ success: true, marked: false });
+  }
+
+  try {
+    await sock.readMessages(receiptKeys);
+    return res.json({ success: true, marked: true });
+  } catch (err) {
+    console.warn('[bridge] failed to send read receipt:', err.message);
+    return res.status(500).json({ error: 'Failed to send read receipt' });
+  }
+});
+
 // Chat info
 app.get('/chat/:id', async (req, res) => {
   const chatId = req.params.id;
@@ -993,16 +1131,30 @@ app.get('/health', (req, res) => {
     queueLength: messageQueue.length,
     uptime: process.uptime(),
     scriptHash: SCRIPT_HASH,
+    sendReadReceipts: SEND_READ_RECEIPTS,
+    // path.resolve, not realpath: the adapter compares against os.path.abspath, which keeps symlinks.
+    session: path.resolve(SESSION_DIR),
+    capabilities: { outboundMentions: true },
   });
 });
 
 // Start
 if (PAIR_ONLY) {
   // Pair-only mode: just connect, show QR, save creds, exit. No HTTP server.
-  console.log('📱 WhatsApp pairing mode');
-  console.log(`📁 Session: ${SESSION_DIR}`);
-  console.log();
-  startSocket();
+  if (PAIR_JSON) {
+    emitPairEvent({ event: 'started', session: SESSION_DIR });
+  } else {
+    console.log('📱 WhatsApp pairing mode');
+    console.log(`📁 Session: ${SESSION_DIR}`);
+    console.log();
+  }
+  startSocket().catch((err) => {
+    emitPairEvent({ event: 'error', error: err?.message || String(err) });
+    if (!PAIR_JSON) {
+      console.error(err);
+    }
+    process.exit(1);
+  });
 } else {
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`🌉 WhatsApp bridge listening on port ${PORT} (mode: ${WHATSAPP_MODE})`);
@@ -1011,6 +1163,8 @@ if (PAIR_ONLY) {
       console.log(`🔒 Allowed users: ${Array.from(ALLOWED_USERS).join(', ')}`);
     } else if (WHATSAPP_MODE === 'self-chat') {
       console.log(`🔒 Self-chat mode — only your own messages to yourself are processed.`);
+    } else if (WHATSAPP_MODE === 'bot' && WHATSAPP_DM_POLICY === 'pairing') {
+      console.log(`🤝 WHATSAPP_DM_POLICY=pairing — unknown DMs are forwarded for gateway pairing.`);
     } else {
       console.log(`🔒 No WHATSAPP_ALLOWED_USERS set — incoming messages are rejected.`);
       console.log(`   Set WHATSAPP_ALLOWED_USERS=<phone> to authorize specific users,`);
@@ -1020,6 +1174,6 @@ if (PAIR_ONLY) {
       console.log(`👤 WHATSAPP_FORWARD_OWNER_MESSAGES=true — owner-typed messages will be forwarded with fromOwner:true`);
     }
     console.log();
-    startSocket();
+    scheduleReconnect(0);
   });
 }
