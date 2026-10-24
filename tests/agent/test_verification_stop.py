@@ -166,3 +166,122 @@ def test_mixed_doc_and_code_edit_still_nudges(tmp_path, monkeypatch):
     # The doc path is filtered out of the reported set; the code path remains.
     assert code in nudge
     assert doc not in nudge
+
+
+# ---------------------------------------------------------------------------
+# Managed scratch: the nudge must name the root the ledger accepts, and a passing probe
+# written there must satisfy the stop loop instead of re-nudging the same workspace.
+# ---------------------------------------------------------------------------
+
+_SCRATCH_KEYS = ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR")
+
+
+def _managed_scratch_env(monkeypatch, home: Path, *, os_temp: Path) -> Path:
+    scratch = home / "cache" / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in _SCRATCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", None, raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    return scratch
+
+
+def test_managed_scratch_pass_satisfies_no_suite_stop_loop(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _managed_scratch_env(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    changed = str(project / "src" / "app.ts")
+    script = scratch / "hermes-verify-stop-managed.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    try:
+        record_terminal_result(
+            command=f"/usr/bin/python3 {script}", cwd=project, session_id="s1",
+            exit_code=0, output="ok",
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed]) is None
+
+
+def test_managed_scratch_failing_probe_still_nudges(tmp_path, monkeypatch):
+    """A red probe must never satisfy the gate."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _managed_scratch_env(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    changed = str(project / "src" / "app.ts")
+    script = scratch / "hermes-verify-stop-red.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    try:
+        record_terminal_result(
+            command=f"python3 {script}", cwd=project, session_id="s1", exit_code=1,
+        )
+    finally:
+        script.unlink(missing_ok=True)
+
+    assert build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed]) is not None
+
+
+def test_repo_prefixed_script_does_not_satisfy_the_stop_loop(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    _managed_scratch_env(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    changed = str(project / "src" / "app.ts")
+    repo_script = project / "hermes-verify-inrepo.py"
+    repo_script.write_text("print('ok')\n", encoding="utf-8")
+    record_terminal_result(
+        command=f"python3 {repo_script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert build_verify_on_stop_nudge(session_id="s1", changed_paths=[changed]) is not None
+
+
+def test_nudge_names_the_managed_scratch_dir_when_it_differs_from_os_temp(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _managed_scratch_env(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+
+    nudge = build_verify_on_stop_nudge(
+        session_id="s1", changed_paths=[str(project / "src" / "app.ts")],
+    )
+
+    assert nudge is not None
+    assert str(os_temp) in nudge
+    assert str(scratch) in nudge
+
+
+def test_nudge_requires_delivering_the_result_not_just_verification(tmp_path, monkeypatch):
+    """A verification follow-up must supplement the answer, never replace it."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    _managed_scratch_env(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+
+    nudge = build_verify_on_stop_nudge(
+        session_id="s1", changed_paths=[str(project / "src" / "app.ts")],
+    )
+
+    assert nudge is not None
+    assert "Deliver the result or answer the task asked for first" in nudge
+    assert "must not replace it" in nudge

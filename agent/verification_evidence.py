@@ -5,6 +5,7 @@ completion, and never upgrades targeted checks into "repo green"."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -302,13 +303,56 @@ def _is_under(token: str, base: str | Path | None) -> bool:
         return False
 
 
+def _managed_scratch_root(home: str | Path) -> Path:
+    """``<home>/cache/scratch`` as a path — never created here.
+
+    The ledger runs on every foreground result, so a read must not write. Resolving a
+    missing path is harmless: it simply matches no real script.
+    """
+    return (Path(home).expanduser() / "cache" / "scratch").resolve()
+
+
+def _temp_roots() -> list[Path]:
+    """Roots an ad-hoc verification script may live under, resolved once per call.
+
+    ``tempfile.gettempdir()`` stays the OS temp root on macOS (``/private/var/folders``)
+    because the boot hook respects an OS-set ``TMPDIR`` and therefore never exports the
+    ``HERMES_SCRATCH_DIR`` marker. The managed scratch dir is ``<active home>/cache/scratch``
+    whether or not that marker exists, so both roots are accepted and a probe written to
+    either one is evidence. Derived from the active home — never a hardcoded profile path —
+    and never created: reading evidence must not write into the operator's home.
+    """
+    roots: dict[str, None] = {}
+    try:
+        # A symlinked temp root (/tmp -> /private/tmp on macOS) must match a path resolved
+        # through either spelling, so record every candidate spelling.
+        os_temp = tempfile.gettempdir()
+        roots.setdefault(os.path.realpath(os_temp))
+        roots.setdefault(str(Path(os_temp).absolute()))
+        roots.setdefault(str(Path(os_temp).resolve()))
+    except Exception:
+        pass
+    try:
+        from hermes_constants import SCRATCH_DIR_MARKER_ENV, get_hermes_home
+
+        marked = os.environ.get(SCRATCH_DIR_MARKER_ENV, "").strip()
+        if marked:
+            roots.setdefault(str(Path(marked).expanduser().resolve()))
+        roots.setdefault(str(_managed_scratch_root(get_hermes_home())))
+    except Exception:
+        pass
+    return [Path(root) for root in roots]
+
+
 def _is_temp_script_path(token: str, root: str | Path | None) -> bool:
-    """An ad-hoc verify script: prefixed name, under the temp dir, outside the repo."""
+    """An ad-hoc verify script: prefixed name, under a managed temp root, outside the repo."""
     try:
         name = Path(token).expanduser().name
     except Exception:
         return False
-    return name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) and _is_under(token, tempfile.gettempdir()) and not _is_under(token, root)
+    if not name.startswith(_AD_HOC_SCRIPT_NAME_PREFIXES) or _is_under(token, root):
+        return False
+    return any(_is_under(token, base) for base in _temp_roots())
 
 
 def _is_interpreter_token(token: str) -> bool:
@@ -461,6 +505,55 @@ def record_terminal_result(
         return None
     evidence = classify_verification_command(command, cwd=cwd, session_id=session_id, exit_code=exit_code, output=output)
     return None if evidence is None else _insert_evidence(evidence)
+
+
+_AD_HOC_SCRIPT_TOKEN_RE = re.compile(
+    r"(?:~|/)?[^\s\"'`()\[\]{},;]*hermes-(?:verify|ad-hoc)-[^\s\"'`()\[\]{},;]*\.py"
+)
+
+
+def _ad_hoc_scripts_in_code(code: str, root: str | Path | None) -> list[str]:
+    """Ad-hoc script paths a foreground ``execute_code`` cell declares.
+
+    Absolute and ``~`` paths are checked as written. A bare filename is resolved against
+    each managed temp root, so the common ``Path(scratch) / "hermes-verify-x.py"`` spelling
+    (where only the filename is literal) still matches. Only a path the ledger already
+    accepts for terminal runs is returned.
+    """
+    found: list[str] = []
+    for match in _AD_HOC_SCRIPT_TOKEN_RE.finditer(code or ""):
+        token = match.group(0).rstrip(".,;:)")
+        if not token:
+            continue
+        candidates = [token]
+        if not token.startswith(("/", "~")):
+            candidates = [str(base / Path(token).name) for base in _temp_roots()]
+        for candidate in candidates:
+            if _is_temp_script_path(candidate, root):
+                found.append(candidate)
+                break
+    return found
+
+
+def record_code_result(
+    *, code: str, cwd: str | Path | None, session_id: str | None, exit_code: int, output: str = ""
+) -> Optional[dict[str, Any]]:
+    """Record a foreground ``execute_code`` cell that ran an ad-hoc verification script.
+
+    The cell's own exit status is the outcome (an ``assert`` or exception fails the cell),
+    and the same trust model as the terminal path applies: a ``hermes-verify-`` path in the
+    cell is the agent's declaration that this run is verification. A cell that names no such
+    script records nothing, so ordinary Python work never marks a workspace verified.
+    """
+    if not _ledger_enabled():
+        return None
+    scripts = _ad_hoc_scripts_in_code(code, cwd)
+    if not scripts:
+        return None
+    return record_terminal_result(
+        command=f"python3 {scripts[0]}", cwd=cwd, session_id=session_id,
+        exit_code=exit_code, output=output,
+    )
 
 
 def record_verify_run(

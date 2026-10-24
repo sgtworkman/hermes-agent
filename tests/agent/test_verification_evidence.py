@@ -9,6 +9,7 @@ import pytest
 from agent.verification_evidence import (
     classify_verification_command,
     mark_workspace_edited,
+    record_code_result,
     record_terminal_result,
     record_verify_run,
     verification_status,
@@ -480,3 +481,310 @@ def test_windows_backslash_ad_hoc_script_path_is_matched(tmp_path, monkeypatch):
     assert result is not None, (
         "Windows backslash path should be matched via posix=False fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# Managed scratch recognition. Hermes points TMPDIR/TMP/TEMP at
+# ``<HERMES_HOME>/cache/scratch`` at boot (``export_scratch_tmp_env``), so the nudge hands
+# the agent that directory and its probes land there — while the ledger only recognized
+# ``tempfile.gettempdir()``. A gateway that resolved the OS default (macOS
+# ``/private/var/folders/...``) then rejected every legitimate scratch probe: a 20/20
+# passing run recorded no evidence and the workspace stayed "unverified" forever.
+# ---------------------------------------------------------------------------
+
+_SCRATCH_KEYS = ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR")
+
+
+def _set_managed_scratch(monkeypatch, home: Path, *, os_temp: Path) -> Path:
+    """Model a Hermes process: OS temp stays the platform default, the scratch dir is the
+    profile's ``<home>/cache/scratch`` and the boot hook tags it with HERMES_SCRATCH_DIR."""
+    scratch = home / "cache" / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in _SCRATCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", None, raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    return scratch
+
+
+def test_managed_scratch_probe_records_ad_hoc_evidence(tmp_path, monkeypatch):
+    """The developer mandate puts temporary probes under the profile scratch dir. A passing
+    interpreter run there is ad-hoc evidence even when ``tempfile`` resolves the OS temp."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-managed.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"/usr/bin/python3 {script}", cwd=project, session_id="s1", exit_code=0, output="ok",
+    )
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+    assert evidence.status == "passed"
+
+
+def test_scratch_marker_alone_is_enough_without_creating_the_scratch_dir(tmp_path, monkeypatch):
+    """A read-only probe (the ledger) must recognize the boot hook's marker even when the
+    scratch dir is not on this filesystem — recognition never creates directories."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = home / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in _SCRATCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", None, raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-marker.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+
+
+def test_managed_scratch_probe_in_a_scratch_subdir_records_evidence(tmp_path, monkeypatch):
+    """A probe written into its own mkdtemp-style scratch subdir is the same evidence."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    probe_dir = scratch / "hermes-verify-dafidwa0"
+    probe_dir.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = probe_dir / "hermes-verify-sources.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+
+
+def test_managed_scratch_probe_failing_records_failed_evidence(tmp_path, monkeypatch):
+    """Recognition must not turn a red probe green: a nonzero exit is recorded as failed."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-failing.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=1, output="FAIL",
+    )
+
+    assert evidence is not None
+    assert evidence.status == "failed"
+
+
+def test_managed_scratch_probe_masked_by_shell_operator_is_not_evidence(tmp_path, monkeypatch):
+    """The masking guard still applies inside the managed scratch dir."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    scratch = _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-masked.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script} || true", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is None
+
+
+def test_prefixed_script_in_the_workspace_is_not_evidence(tmp_path, monkeypatch):
+    """The prefix alone never makes a script evidence: it must live in managed temp."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    repo_script = project / "hermes-verify-inrepo.py"
+    repo_script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {repo_script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is None
+
+
+def test_prefixed_script_in_an_unrelated_directory_is_not_evidence(tmp_path, monkeypatch):
+    """A prefixed name outside both the OS temp and the managed scratch dir is not evidence."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    script = elsewhere / "hermes-verify-stray.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is None
+
+
+def test_os_temp_probe_still_records_evidence_with_managed_scratch_set(tmp_path, monkeypatch):
+    """Green control: recognizing the scratch dir must not drop the OS temp root."""
+    home = tmp_path / ".hermes"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    _set_managed_scratch(monkeypatch, home, os_temp=os_temp)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = os_temp / "hermes-verify-ostemp.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"python3 {script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+
+
+# ---------------------------------------------------------------------------
+# A live macOS profile: the OS sets TMPDIR, so ``apply_scratch_tmp_env`` respects it and
+# never exports HERMES_SCRATCH_DIR. Recognition must come from the active home alone, and
+# a foreground ``execute_code`` cell is the same evidence a terminal run is.
+# ---------------------------------------------------------------------------
+
+
+def _profile_home_env(monkeypatch, tmp_path, *, marker: bool = False):
+    home = tmp_path / ".hermes" / "profiles" / "workman-executive"
+    scratch = home / "cache" / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in _SCRATCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    if marker:
+        monkeypatch.setenv("HERMES_SCRATCH_DIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", None, raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+    return home, scratch, os_temp
+
+
+def test_profile_scratch_is_recognized_without_the_boot_marker(tmp_path, monkeypatch):
+    """macOS keeps the OS-set TMPDIR, so the boot hook never exports the marker. The active
+    profile's scratch dir is still the managed root and must be recognized."""
+    _, scratch, _ = _profile_home_env(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-profile.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = classify_verification_command(
+        f"/usr/bin/python3 {script}", cwd=project, session_id="s1", exit_code=0,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == "ad_hoc"
+    assert evidence.status == "passed"
+
+
+def test_recognizing_scratch_never_creates_the_directory(tmp_path, monkeypatch):
+    """The ledger runs on every foreground result; a read must not write into the home."""
+    home = tmp_path / ".hermes" / "profiles" / "workman-executive"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in _SCRATCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", None, raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(os_temp))
+
+    from agent.verification_evidence import _temp_roots
+
+    roots = {str(path) for path in _temp_roots()}
+
+    assert str((home / "cache" / "scratch").resolve()) in roots
+    assert not (home / "cache").exists()
+
+
+def test_execute_code_cell_naming_a_managed_script_records_evidence(tmp_path, monkeypatch):
+    """A foreground execute_code cell that ran a prefixed probe is evidence, like terminal."""
+    _, scratch, _ = _profile_home_env(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-cell.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    evidence = record_code_result(
+        code=f"subprocess.run(['/usr/bin/python3', '{script}'], check=True)\n",
+        cwd=project, session_id="s1", exit_code=0, output="ok",
+    )
+
+    assert evidence is not None
+    assert evidence["status"] == "passed"
+    assert evidence["canonical_command"] == "ad-hoc verification script"
+
+
+def test_execute_code_cell_without_a_managed_script_records_nothing(tmp_path, monkeypatch):
+    """Ordinary Python work must never mark a workspace verified."""
+    _profile_home_env(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+
+    assert record_code_result(
+        code="print('hello')\n", cwd=project, session_id="s1", exit_code=0,
+    ) is None
+
+
+def test_execute_code_failed_cell_records_failed_evidence(tmp_path, monkeypatch):
+    """A failing cell is recorded as failed so the nudge can demand a repair."""
+    _, scratch, _ = _profile_home_env(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}", encoding="utf-8")
+    script = scratch / "hermes-verify-cell-fail.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+
+    evidence = record_code_result(
+        code=f"subprocess.run(['/usr/bin/python3', '{script}'], check=True)\n",
+        cwd=project, session_id="s1", exit_code=1, output="boom",
+    )
+
+    assert evidence is not None
+    assert evidence["status"] == "failed"

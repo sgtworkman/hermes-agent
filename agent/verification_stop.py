@@ -121,6 +121,22 @@ def _format_changed_paths(paths: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _scratch_root_for_nudge() -> str:
+    """Hermes' managed scratch dir (``<active home>/cache/scratch``) as a real path, or ``""``.
+
+    The ledger accepts ad-hoc scripts under this dir whether or not the boot hook exported
+    ``HERMES_SCRATCH_DIR`` (it does not on macOS, where the OS-set ``TMPDIR`` is respected),
+    so naming it here keeps the instruction and the evidence rule identical. Never creates
+    it: a nudge must stay a read.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        return os.path.realpath(Path(get_hermes_home()) / "cache" / "scratch")
+    except Exception:
+        return ""
+
+
 def _workspace_has_runnable_recipe(root: Any) -> bool:
     """Whether ``hermes verify`` has a runtime recipe here: a saved
     ``.hermes/environment.json`` or a statically detected recipe with a start
@@ -206,10 +222,17 @@ def build_verify_on_stop_nudge(
             "Read any failure, repair the code, and summarize what passed."
         )
     else:
+        # Hand the agent the SAME root the ledger recognizes for ad-hoc evidence: Hermes
+        # points tempfile at the profile scratch dir (``hermes_constants.export_scratch_tmp_env``),
+        # so a probe written there is evidence even when this process resolved the OS default.
         temp_dir = os.path.realpath(tempfile.gettempdir())
+        scratch_dir = _scratch_root_for_nudge()
+        location = f"`{temp_dir}`"
+        if scratch_dir and scratch_dir != temp_dir:
+            location = f"`{temp_dir}` (or Hermes' managed scratch dir `{scratch_dir}`)"
         command_instruction = (
             "No canonical test/lint/build command was detected. Create a focused "
-            f"temporary verification script under `{temp_dir}` using an OS-safe "
+            f"temporary verification script under {location} using an OS-safe "
             "`tempfile` path with a `hermes-verify-` filename prefix, run it "
             "against the changed behavior, clean it up when possible, and "
             "summarize it explicitly as ad-hoc verification rather than suite "
@@ -222,7 +245,9 @@ def build_verify_on_stop_nudge(
         f"Verification status: {_status_detail(status)}\n\n"
         f"Changed paths:\n{_format_changed_paths(paths)}\n\n"
         f"{command_instruction} If verification is not possible, explain the "
-        "concrete blocker instead of claiming the work is fully verified."
+        "concrete blocker instead of claiming the work is fully verified. "
+        "Deliver the result or answer the task asked for first; verification "
+        "supplements it and must not replace it."
         f"{addendum}]"
     )
 

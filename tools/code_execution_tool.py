@@ -946,6 +946,36 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
 EXECUTE_CODE_SCHEMA = build_execute_code_schema()
 
 
+def _record_code_verification(
+    code: str, result_json: str, *, task_id: Optional[str], session_id: Optional[str]
+) -> None:
+    """Record a foreground cell that ran an ad-hoc verification script.
+
+    Best-effort: the cell already ran, so a ledger failure must never turn the tool result
+    into an error. Only a cell naming a managed ``hermes-verify-``/``hermes-ad-hoc-`` script
+    is evidence; ordinary Python work records nothing.
+    """
+    try:
+        payload = json.loads(result_json)
+        exit_code = payload.get("exit_code")
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+            return
+        if not session_id:
+            from agent.vault_backends.unlock import get_current_session_id
+
+            session_id = get_current_session_id()
+        from agent.verification_evidence import record_code_result
+        from tools.code_execution_env import _resolve_child_cwd
+
+        cwd = _resolve_child_cwd(_get_execution_mode(), "", task_id or "")
+        record_code_result(
+            code=code, cwd=cwd, session_id=session_id, exit_code=exit_code,
+            output=str(payload.get("output") or ""),
+        )
+    except Exception:
+        logger.debug("execute_code verification evidence recording failed", exc_info=True)
+
+
 def _execute_code_handler(args: dict, **kwargs) -> str:
     """Redirect misdirected calls (terminal's ``command`` arg, non-string ``code``) with an
     actionable error before dispatching to ``execute_code``."""
@@ -958,8 +988,11 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
     if code is not None and not isinstance(code, str):
         return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
                           "requires Python source as a string. Retry as execute_code(code=\"...\").")
-    return execute_code(code=code or "", task_id=kwargs.get("task_id"),
-                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
+    result = execute_code(code=code or "", task_id=kwargs.get("task_id"),
+                          enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
+    _record_code_verification(code or "", result, task_id=kwargs.get("task_id"),
+                              session_id=kwargs.get("session_id"))
+    return result
 
 
 registry.register(
