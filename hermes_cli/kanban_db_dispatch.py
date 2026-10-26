@@ -126,6 +126,11 @@ class DispatchResult:
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
+    blocked_unavailable_skills: list[tuple[str, str]] = field(default_factory=list)
+    """``(task_id, missing_skills)`` parked because the assignee cannot load any
+    of the task's force-loaded skills.  The worker would exit with
+    ``kanban_skills_unavailable`` before doing any work; blocking here stops the
+    dispatcher from burning one spawn attempt per tick on an impossible task."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -168,6 +173,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             continue
         for _task_id, reason in res.respawn_guarded:
             counts[reason] = counts.get(reason, 0) + 1
+        if res.blocked_unavailable_skills:
+            counts["unavailable_skills"] = counts.get("unavailable_skills", 0) + len(res.blocked_unavailable_skills)
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
         if res.skipped_locked:
@@ -2050,6 +2057,35 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+def _task_skill_preflight(assignee: str, task_id: str, skills: Optional[list]) -> Optional[list[str]]:
+    """Return the missing force-loaded skills when none can be loaded.
+
+    The worker's ``build_preloaded_skills_prompt`` raises only when *all*
+    requested skills are unavailable.  Match that contract here: a partial load
+    is left to the worker (it logs and continues), while an all-missing task is
+    parked before a claim/spawn so it cannot crash-loop once per tick.
+    """
+    requested = [str(skill).strip() for skill in (skills or []) if str(skill).strip()]
+    if not requested:
+        return None
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+        profile_home = resolve_profile_env(normalize_profile_name(assignee))
+    except Exception as exc:
+        _kb._log.debug("kanban skill preflight: could not resolve profile %r (%s)", assignee, exc)
+        return None
+    try:
+        from agent.skill_commands import build_preloaded_skills_prompt
+
+        with _worker_profile_scope(str(profile_home)):
+            _prompt, loaded, missing = build_preloaded_skills_prompt(requested, task_id=task_id)
+        return list(missing) if missing and not loaded else None
+    except Exception as exc:
+        _kb._log.debug("kanban skill preflight: could not load skills for %r (%s)", assignee, exc)
+        return None
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2090,6 +2126,28 @@ def _dispatch_lane_task(
                 if (last is None or last["kind"] != "skipped_nonspawnable"
                         or last["payload"] != _kb._json_or_null({"assignee": assignee})):
                     _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
+        return False
+    requested_skills = _kb._json_or(row["skills"])
+    if not isinstance(requested_skills, list):
+        requested_skills = []
+    requested_skills = [str(skill) for skill in requested_skills if str(skill).strip()]
+    if lane == "review":
+        requested_skills = list(dict.fromkeys([*requested_skills, "sdlc-review"]))
+    missing_skills = _task_skill_preflight(assignee, task_id, requested_skills)
+    if missing_skills:
+        missing_text = ", ".join(missing_skills)
+        result.blocked_unavailable_skills.append((task_id, missing_text))
+        if not dry_run:
+            _kb.block_task(
+                conn,
+                task_id,
+                reason=(
+                    f"Assignee '{assignee}' cannot load any required skill: {missing_text}. "
+                    "The worker would exit with kanban_skills_unavailable before doing work. "
+                    "Reassign the card or install the skill, then unblock."
+                ),
+                kind="capability",
+            )
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -2297,7 +2355,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, skills FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
