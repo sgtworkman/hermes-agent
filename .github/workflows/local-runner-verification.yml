@@ -46,3 +46,10 @@ jobs:
           assert not bad, 'Hosted or unresolved runner declarations: ' + ', '.join(bad)
           print(json.dumps({'runner': os.environ['EXECUTOR_NAME'], 'environment': os.environ['EXECUTOR_ENVIRONMENT'], 'os': os.environ['EXECUTOR_OS'], 'arch': os.environ['EXECUTOR_ARCH'], 'machine': platform.machine(), 'ref': os.environ['GITHUB_REF'], 'sha': os.environ['GITHUB_SHA'], 'workflow_files_checked': len(files), 'runner_declarations_checked': count}, sort_keys=True))
           PY
+      - name: Verify local Linux container runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker version --format '{{.Server.APIVersion}}'
+          docker info --format '{{json .SecurityOptions}}'
+          test "$(docker run --rm --network none busybox:1.37.0 uname -m)" = "$(uname -m)"
