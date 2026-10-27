@@ -39,6 +39,8 @@ jobs:
           count = 0
           for path in files:
               for number, line in enumerate(path.read_text().splitlines(), 1):
+                  external = re.search(r'uses:\s*([^\s]+/\.github/workflows/[^\s]+)', line)
+                  assert not external or external.group(1).startswith('./'), 'External reusable workflow must be localized: ' + str(path)
                   if re.match(r'^\s*runs-on\s*:', line):
                       count += 1
                       if 'self-hosted' not in line:
