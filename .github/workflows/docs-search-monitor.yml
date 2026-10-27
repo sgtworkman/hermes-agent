@@ -31,8 +31,8 @@ concurrency:
 
 jobs:
   probe:
-    if: github.repository == 'NousResearch/hermes-agent'
-    runs-on: ubuntu-latest
+    if: ${{ (github.repository == 'NousResearch/hermes-agent') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1

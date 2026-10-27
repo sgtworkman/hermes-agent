@@ -70,8 +70,9 @@ jobs:
   # Resolve the release phase. Release modes run only via workflow_call from
   # the parent stable-release workflow, which passes the candidate commit.
   mode:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Resolve release phase
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     outputs:
       phase: ${{ steps.resolve.outputs.phase }}
@@ -99,13 +100,13 @@ jobs:
   detect:
     name: Detect affected areas
     needs: [mode]
-    if: needs.mode.outputs.release != 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ (needs.mode.outputs.release != 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 10
     outputs:
       build: ${{ steps.gate.outputs.build }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
 
@@ -143,9 +144,7 @@ jobs:
   build:
     name: Build and test image (${{ matrix.variant }}/${{ matrix.arch }})
     needs: [mode, detect]
-    if: >-
-      !cancelled() && needs.mode.result == 'success' &&
-      ((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
+    if: ${{ (!cancelled() && needs.mode.result == 'success' && ((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     strategy:
       fail-fast: false
       matrix:
@@ -165,11 +164,11 @@ jobs:
             runner: blacksmith-32vcpu-ubuntu-2404-arm
             platform: linux/arm64
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(contains((matrix.runner), 'windows') && contains((matrix.runner), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((matrix.runner), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((matrix.runner), 'macos') && contains((matrix.runner), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((matrix.runner), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((matrix.runner), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: 45
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           # Stable dispatches from the default branch and names the claim commit.
           # Pin it, never a mutable branch ref.
@@ -213,16 +212,16 @@ jobs:
       - name: Set up Docker Buildx
         id: buildx
         continue-on-error: true
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       - name: Set up Docker Buildx (retry)
         if: steps.buildx.outcome == 'failure'
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       # Build once, load into the local daemon for testing.  Cached
       # per-arch; the push step below reuses every layer from this build.
       - name: Build image (${{ matrix.variant }}/${{ matrix.arch }})
-        uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850  # v2
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v2
         with:
           context: .
           file: Dockerfile
@@ -335,10 +334,7 @@ jobs:
   # release gate, so a main push can never advance the stable channel.
   # ---------------------------------------------------------------------------
   publish:
-    if: >-
-      needs.mode.outputs.release != 'true' &&
-      github.repository == 'NousResearch/hermes-agent' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ (needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [mode, build]
     environment: container-publish
     strategy:
@@ -354,11 +350,11 @@ jobs:
           - arch: arm64
             runner: blacksmith-32vcpu-ubuntu-2404-arm
             platform: linux/arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(contains((matrix.runner), 'windows') && contains((matrix.runner), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((matrix.runner), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((matrix.runner), 'macos') && contains((matrix.runner), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((matrix.runner), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((matrix.runner), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: 30
     steps:
       - name: Checkout trusted source
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
@@ -388,11 +384,11 @@ jobs:
       - name: Set up Docker Buildx
         id: buildx
         continue-on-error: true
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       - name: Set up Docker Buildx (retry)
         if: steps.buildx.outcome == 'failure'
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       - name: Log in to Docker Hub
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -404,7 +400,7 @@ jobs:
       # manifest list after both architecture publishers complete.
       - name: Push ${{ matrix.variant }}/${{ matrix.arch }} by digest
         id: push
-        uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850  # v2
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v2
         with:
           context: .
           file: Dockerfile
@@ -442,11 +438,11 @@ jobs:
   merge:
     # `needs` is the whole 4-leg matrix: only publish both :main variants
     # after every arch and variant publisher succeeds.
-    if: ${{ !cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ (!cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     # GitHub-hosted with docker/setup-buildx-action, as before the runner migration: on
     # Blacksmith `imagetools create` cannot commit a manifest list to Docker Hub (404 on the
     # index commit, any buildx version): v0.22.3 rc.1-rc.4 died on it in the versioned manifest.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     needs: [mode, publish]
     timeout-minutes: 10
     environment: container-publish
@@ -532,7 +528,7 @@ jobs:
   # login/push fails loudly (missing credentials) instead of faking green.
   release-publish:
     name: Publish tested Docker image (${{ matrix.variant }}/${{ matrix.arch }})
-    if: needs.mode.outputs.phase == 'publish'
+    if: ${{ (needs.mode.outputs.phase == 'publish') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [mode]
     environment: container-publish
     strategy:
@@ -540,7 +536,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         variant: [slim, desktop]
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 45
     env:
       ARCH: ${{ matrix.arch }}
@@ -549,7 +545,7 @@ jobs:
       SUFFIX: ${{ matrix.variant == 'desktop' && '-desktop' || '' }}
     steps:
       - name: Checkout release code (helper scripts only, no build)
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit || github.sha }}
 
@@ -569,11 +565,11 @@ jobs:
       - name: Set up Docker Buildx
         id: buildx
         continue-on-error: true
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       - name: Set up Docker Buildx (retry)
         if: steps.buildx.outcome == 'failure'
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v2
 
       - name: Load tested image
         run: |
@@ -629,12 +625,12 @@ jobs:
   # to the parent release receipt. Registry-side only; nothing is rebuilt.
   release-publish-manifest:
     name: Assemble versioned manifest and digest receipt
-    if: needs.mode.outputs.phase == 'publish'
+    if: ${{ (needs.mode.outputs.phase == 'publish') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [mode, release-publish]
     # GitHub-hosted with docker/setup-buildx-action, as before the runner migration: on
     # Blacksmith `imagetools create` cannot commit a manifest list to Docker Hub (404 on the
     # index commit, any buildx version): v0.22.3 rc.1-rc.4 died on it in the versioned manifest.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     outputs:
       digest: ${{ steps.list.outputs.digest }}
     timeout-minutes: 15
@@ -764,9 +760,9 @@ jobs:
   # publisher turns this red instead of letting the phase go green.
   release-phase-gate:
     name: Docker phase requirements met
-    if: always() && inputs.release-phase != ''
+    if: ${{ (always() && inputs.release-phase != '') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [mode, build, release-publish, release-publish-manifest]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     steps:
       - name: Validate phase job results

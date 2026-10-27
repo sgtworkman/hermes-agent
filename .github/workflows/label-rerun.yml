@@ -25,8 +25,8 @@ concurrency:
 jobs:
   rerun-with-e2e:
     name: Rerun CI with every E2E lane
-    if: github.event.label.name == 'run-e2e'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ (github.event.label.name == 'run-e2e') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 15
     steps:
       - name: Cancel and rerun the head commit's CI, Docker and Nix runs

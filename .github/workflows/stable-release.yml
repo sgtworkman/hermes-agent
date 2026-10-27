@@ -32,13 +32,14 @@ concurrency:
 
 jobs:
   admit:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Admit the claim
     # A read token cannot see a draft release, so gh release view answers
     # "release not found" for a draft that exists. Write is the permission
     # that can read it.
     permissions:
       contents: write
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     outputs:
       claim-tag: ${{ steps.admit.outputs.claim-tag }}
       claim-object: ${{ steps.admit.outputs.claim-object }}
@@ -53,7 +54,7 @@ jobs:
       lanes: ${{ steps.admit.outputs.lanes }}
       jobs: ${{ steps.admit.outputs.jobs }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -70,7 +71,7 @@ jobs:
   ci:
     name: Full CI pipeline
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['ci']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['ci']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: read
       pull-requests: write
@@ -87,8 +88,7 @@ jobs:
     # The image publish-docker pushes is built here, so a claim that skipped
     # tests still runs this job with its tests off. It builds alongside the
     # gates; only the acceptance join waits for CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['docker']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['docker']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/docker.yml
     secrets: inherit
     with:
@@ -101,7 +101,7 @@ jobs:
   nix:
     needs: admit
     # The claim's policy removes it, not a gate it happens to need.
-    if: fromJSON(needs.admit.outputs.jobs)['nix']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['nix']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/nix.yml
     with:
       commit: ${{ needs.admit.outputs.commit }}
@@ -110,7 +110,7 @@ jobs:
 
   pm-bundle:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['pm-bundle']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['pm-bundle']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/pm-bundle.yml
     with:
       release: true
@@ -118,7 +118,7 @@ jobs:
 
   termux-checks:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['termux-checks']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['termux-checks']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: read
       actions: read
@@ -130,7 +130,7 @@ jobs:
 
   windows-live:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['windows-live']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['windows-live']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/windows-venv-e2e.yml
     with:
       commit: ${{ needs.admit.outputs.commit }}
@@ -139,7 +139,7 @@ jobs:
   install-e2e:
     name: Install and update E2E
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['install-e2e']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['install-e2e']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: read
       actions: read
@@ -155,8 +155,7 @@ jobs:
     name: Build signed release candidates (darwin-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-arm64']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-arm64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -178,8 +177,7 @@ jobs:
     # Starts with the gates; the acceptance join is what requires CI.
     # macOS Intel is off by default: unsupported on main, and its macos-15-intel
     # runner adds over an hour to the release.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-x64']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-x64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -199,8 +197,7 @@ jobs:
     name: Build signed release candidates (win32-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-arm64']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-arm64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -223,8 +220,7 @@ jobs:
     name: Build signed release candidates (win32-x64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-x64']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-x64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -247,10 +243,7 @@ jobs:
     name: Build signed release candidates (win32-bundle)
     needs: [admit, candidates-win32-arm64, candidates-win32-x64]
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-bundle']
-      && needs.candidates-win32-arm64.result == 'success'
-      && needs.candidates-win32-x64.result == 'success'
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-bundle'] && needs.candidates-win32-arm64.result == 'success' && needs.candidates-win32-x64.result == 'success') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -274,8 +267,7 @@ jobs:
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
     # Termux is off by default.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-termux']
+    if: ${{ (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-termux']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -294,15 +286,15 @@ jobs:
   transitions-darwin-arm64:
     name: Pin actual OLD and NEW signed packages (darwin-arm64)
     needs: [admit, candidates-darwin-arm64]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-darwin-arm64']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['transitions-darwin-arm64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -330,15 +322,15 @@ jobs:
   transitions-darwin-x64:
     name: Pin actual OLD and NEW signed packages (darwin-x64)
     needs: [admit, candidates-darwin-x64]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-darwin-x64']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['transitions-darwin-x64']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -366,15 +358,15 @@ jobs:
   transitions-win32:
     name: Pin actual OLD and NEW signed packages (win32)
     needs: [admit, candidates-win32-bundle]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-win32']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['transitions-win32']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -405,10 +397,10 @@ jobs:
     # The recorded smoke results are the calls' own workflow results: a
     # call's stable-phase-result fails when its smokes fail, so a failed
     # smoke fails this job's RELEASE_NEEDS check and stages no manifest.
-    if: always() && fromJSON(needs.admit.outputs.jobs)['candidate-manifest']
+    if: ${{ (always() && fromJSON(needs.admit.outputs.jobs)['candidate-manifest']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [admit, candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     environment: release-signing
     timeout-minutes: 90
     outputs:
@@ -425,7 +417,7 @@ jobs:
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
       CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -441,7 +433,7 @@ jobs:
     name: Windows signed-package acceptance
     needs: [admit, transitions-win32]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['windows-packaged'] && needs.transitions-win32.outputs.baseline != 'none'
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['windows-packaged'] && needs.transitions-win32.outputs.baseline != 'none') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-win32.outputs.windows) }}
@@ -460,7 +452,7 @@ jobs:
     name: macOS arm64 signed-package acceptance
     needs: [admit, transitions-darwin-arm64]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['macos-packaged-arm64'] && needs.transitions-darwin-arm64.outputs.baseline != 'none'
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['macos-packaged-arm64'] && needs.transitions-darwin-arm64.outputs.baseline != 'none') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-arm64.outputs.macos) }}
@@ -479,7 +471,7 @@ jobs:
     name: macOS x64 signed-package acceptance
     needs: [admit, transitions-darwin-x64]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['macos-packaged-x64'] && needs.transitions-darwin-x64.outputs.baseline != 'none'
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['macos-packaged-x64'] && needs.transitions-darwin-x64.outputs.baseline != 'none') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-x64.outputs.macos) }}
@@ -497,10 +489,10 @@ jobs:
   bootstrap-version:
     name: Bootstrap installer release identity
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['bootstrap-version']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['bootstrap-version']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ needs.admit.outputs.commit }}
       - name: Stamp and verify the Cargo and Tauri release identity
@@ -530,16 +522,16 @@ jobs:
 
   acceptance:
     name: All release acceptance checks pass
-    if: always()
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [admit, ci, docker, nix, pm-bundle, termux-checks, windows-live, install-e2e,
             candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux,
             candidate-manifest, transitions-darwin-arm64, transitions-darwin-x64,
             transitions-win32, windows-packaged, macos-packaged-arm64, macos-packaged-x64,
             bootstrap-version]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-pm
@@ -555,7 +547,7 @@ jobs:
     # B5: this job pushes only the immutable attempt-ref image tags; the
     # stable/latest aliases move in the ordered publication pass.
     needs: [admit, docker]
-    if: fromJSON(needs.admit.outputs.jobs)['publish-docker']
+    if: ${{ (fromJSON(needs.admit.outputs.jobs)['publish-docker']) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/docker.yml
     secrets: inherit
     with:
@@ -570,9 +562,7 @@ jobs:
     # acceptance's own needs include signed-package arms that skip when there is no published
     # baseline (the first bundled release). Without !cancelled() that skip propagates here and
     # publication then refuses publish-bundles=skipped. acceptance itself is the gate.
-    if: >-
-      !cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-bundles']
-      && needs.acceptance.result == 'success' && needs.candidate-manifest.result == 'success'
+    if: ${{ (!cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-bundles'] && needs.acceptance.result == 'success' && needs.candidate-manifest.result == 'success') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     permissions:
       contents: write
       actions: read
@@ -590,11 +580,11 @@ jobs:
 
   publication:
     name: All artifact publication succeeded
-    if: always()
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [admit, acceptance, publish-docker, publish-bundles]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-pm
@@ -607,13 +597,13 @@ jobs:
 
   complete:
     name: Stable release is green
-    if: always()
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [admit, ci, docker, acceptance, candidate-manifest, publication, publish-docker,
             windows-packaged, macos-packaged-arm64, macos-packaged-x64]
     # GitHub-hosted with docker/setup-buildx-action, as before the runner migration: on
     # Blacksmith `imagetools create` cannot commit a manifest list to Docker Hub (404 on the
     # index commit, any buildx version): v0.22.3 rc.1-rc.4 died on it in the versioned manifest.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     environment: release-signing
     permissions:
       contents: write

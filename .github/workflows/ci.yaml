@@ -69,8 +69,9 @@ jobs:
   # tag is not a meaningful applicability signal.
   # ─────────────────────────────────────────────────────────────────────
   detect:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Detect affected areas
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 3
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
@@ -93,7 +94,7 @@ jobs:
       e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
       event_name: ${{ github.event_name }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
           sparse-checkout: |
@@ -146,7 +147,7 @@ jobs:
     needs: detect
     # Its E2E jobs are lanes of their own: a lane the classifier sets must reach
     # its job whatever `python` says (tests/ci/test_update_ci_routing.py).
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
+    if: ${{ (needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/tests.yml
     with:
       commit: ${{ inputs.commit }}
@@ -163,7 +164,7 @@ jobs:
   tests-os:
     name: OS-specific tests
     needs: detect
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
+    if: ${{ (needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/tests-os.yml
     with:
       commit: ${{ inputs.commit }}
@@ -179,7 +180,7 @@ jobs:
     name: Python lints
     needs: detect
     # frontend too: the code-health ratchet in lint.yml also covers TypeScript.
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true'
+    if: ${{ (needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/lint.yml
     with:
       commit: ${{ inputs.commit }}
@@ -189,7 +190,7 @@ jobs:
   js-tests:
     name: JS & TS checks
     needs: detect
-    if: needs.detect.outputs.frontend == 'true'
+    if: ${{ (needs.detect.outputs.frontend == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/js-tests.yml
     with:
       commit: ${{ inputs.commit }}
@@ -199,7 +200,7 @@ jobs:
     needs: detect
     # Only for PRs that touch a Rust crate. `.rs` is under apps/, so these
     # changes used to run the TypeScript matrix and nothing that compiles them.
-    if: needs.detect.outputs.rust == 'true'
+    if: ${{ (needs.detect.outputs.rust == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/rust-tests.yml
     with:
       commit: ${{ inputs.commit }}
@@ -210,7 +211,7 @@ jobs:
     # A PR that changes only catalog entry data runs these instead of the
     # Python suite (the classifier turns `python` off for it); required whenever
     # detect selects it.
-    if: needs.detect.outputs.catalog == 'true'
+    if: ${{ (needs.detect.outputs.catalog == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/catalog-tests.yml
     with:
       commit: ${{ inputs.commit }}
@@ -222,7 +223,7 @@ jobs:
     # runner's Docker daemon. Only PRs that touch the backends / terminal tool /
     # their real tests start it (and every push to main); it runs in parallel with
     # the other lanes and is required whenever detect selects it.
-    if: needs.detect.outputs.remote_backends == 'true'
+    if: ${{ (needs.detect.outputs.remote_backends == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/remote-backends.yml
     with:
       commit: ${{ inputs.commit }}
@@ -233,7 +234,7 @@ jobs:
     # The bootstrap-installer path: install.sh, the pin fragments it embeds,
     # and the version stamp it ships. The PowerShell installer's native tests
     # are platforms("windows") pytest files and run in tests-os.
-    if: needs.detect.outputs.bootstrap == 'true'
+    if: ${{ (needs.detect.outputs.bootstrap == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/bootstrap-installer.yml
     with:
       commit: ${{ inputs.commit }}
@@ -253,7 +254,7 @@ jobs:
     # occurred") — every ci.yaml run repo-wide dispatched 0 jobs from
     # 24f5a60ed1 until this line changed. To re-enable, restore:
     #   if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    if: false
+    if: ${{ (false) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/e2e-desktop.yml
     with:
       commit: ${{ inputs.commit }}
@@ -263,7 +264,7 @@ jobs:
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
-    if: needs.detect.outputs.e2e_desktop_core == 'true'
+    if: ${{ (needs.detect.outputs.e2e_desktop_core == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/e2e-desktop-core.yml
     with:
       commit: ${{ inputs.commit }}
@@ -278,7 +279,7 @@ jobs:
     # the Linux e2e-upgrade shards and the Windows install + update journey
     # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
     # counts as success — when the PR does not touch that path.
-    if: needs.detect.outputs.e2e_desktop_update == 'true'
+    if: ${{ (needs.detect.outputs.e2e_desktop_update == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/e2e-desktop-update.yml
     with:
       commit: ${{ inputs.commit }}
@@ -286,7 +287,7 @@ jobs:
   docs-site:
     name: Docs Site
     needs: detect
-    if: needs.detect.outputs.site == 'true'
+    if: ${{ (needs.detect.outputs.site == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/docs-site-checks.yml
     with:
       commit: ${{ inputs.commit }}
@@ -294,7 +295,7 @@ jobs:
   history-check:
     name: Deny unrelated histories
     needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request'
+    if: ${{ (needs.detect.outputs.event_name == 'pull_request') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/history-check.yml
     with:
       commit: ${{ inputs.commit }}
@@ -302,7 +303,7 @@ jobs:
   contributor-check:
     name: Check contributors
     needs: detect
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.catalog == 'true'
+    if: ${{ (needs.detect.outputs.python == 'true' || needs.detect.outputs.catalog == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/contributor-check.yml
     with:
       commit: ${{ inputs.commit }}
@@ -315,12 +316,13 @@ jobs:
     # blip, a blocking red X — for diffs that cannot desync the lockfile
     # (docs, frontend, prose). Only pyproject.toml / uv.lock can. A
     # `.github/` change still forces it on via the classifier's fail-open.
-    if: needs.detect.outputs.uv_lock == 'true'
+    if: ${{ (needs.detect.outputs.uv_lock == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/uv-lockfile-check.yml
     with:
       commit: ${{ inputs.commit }}
 
   infographic-check:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Check no committed infographics
     needs: detect
     uses: ./.github/workflows/infographic-check.yml
@@ -328,6 +330,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   profile-artifact-check:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Profile artifact check
     needs: detect
     uses: ./.github/workflows/profile-artifact-check.yml
@@ -335,6 +338,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   icons-freshness-check:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Icon assets freshness
     needs: detect
     uses: ./.github/workflows/icons-freshness-check.yml
@@ -342,6 +346,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   case-collision-check:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Check no case-colliding filenames
     needs: detect
     uses: ./.github/workflows/case-collision-check.yml
@@ -349,6 +354,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   blob-size-check:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Check no large binaries
     needs: detect
     uses: ./.github/workflows/blob-size-check.yml
@@ -356,6 +362,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   lazy-deps-guard:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: No production imports of the tools.lazy_deps stub
     needs: detect
     uses: ./.github/workflows/lazy-deps-guard.yml
@@ -365,7 +372,7 @@ jobs:
   lockfile-diff:
     name: package-lock.json diff
     needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true'
+    if: ${{ (needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/lockfile-diff.yml
     with:
       commit: ${{ inputs.commit }}
@@ -375,7 +382,7 @@ jobs:
   prompt-surface-diff:
     name: Prompt surface diff
     needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.python == 'true'
+    if: ${{ (needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.python == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/prompt-surface-diff.yml
     with:
       commit: ${{ inputs.commit }}
@@ -383,7 +390,7 @@ jobs:
   docker-lint:
     name: Lint Docker scripts
     needs: detect
-    if: needs.detect.outputs.docker_meta == 'true'
+    if: ${{ (needs.detect.outputs.docker_meta == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/docker-lint.yml
     with:
       commit: ${{ inputs.commit }}
@@ -391,7 +398,7 @@ jobs:
   supply-chain:
     name: Supply-chain scan
     needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true')
+    if: ${{ (needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true')) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/supply-chain-audit.yml
     with:
       commit: ${{ inputs.commit }}
@@ -461,13 +468,13 @@ jobs:
       # its own check. It was never required here, because it is too slow
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
-    if: always()
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit || github.sha }}
       - name: Evaluate job results
@@ -499,12 +506,12 @@ jobs:
       contents: read
       actions: read # download completed jobs' cache transfer logs
     needs: [all-checks-pass]
-    if: always()
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
 

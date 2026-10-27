@@ -27,15 +27,11 @@ permissions:
 
 jobs:
   reconcile:
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion != 'success' &&
-       github.event.workflow_run.event == 'workflow_dispatch' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+    if: ${{ (github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository)) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     # GitHub-hosted with docker/setup-buildx-action, as before the runner migration: on
     # Blacksmith `imagetools create` cannot commit a manifest list to Docker Hub (404 on the
     # index commit, any buildx version): v0.22.3 rc.1-rc.4 died on it in the versioned manifest.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 30
     environment: release-signing
     steps:

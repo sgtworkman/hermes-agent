@@ -25,14 +25,15 @@ concurrency:
 
 jobs:
   posix:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: install.sh protocol + small fresh-install E2E
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 15
     # NOTE: `runner.temp` is only available in step-level env, not job-level
     # env — a job-env `${{ runner.temp }}` makes GitHub reject the workflow
     # graph at dispatch (0 jobs). Each step that needs these exports them.
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
           # The mirror step pushes HEAD to a fresh bare repo — a shallow
@@ -133,11 +134,12 @@ jobs:
         run: bash scripts/run_tests.sh tests/scripts/test_fresh_source_install.py -q -j 1
 
   windows:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: install.ps1 protocol surface
-    runs-on: blacksmith-2vcpu-windows-2025
+    runs-on: ["self-hosted","Windows","X64","workman-ci"]
     timeout-minutes: 10
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
       # Windows PowerShell 5.1 is what ships with Windows and what `irm | iex`

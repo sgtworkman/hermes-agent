@@ -63,8 +63,9 @@ permissions:
 
 jobs:
   validate:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Require a supported native smoke target
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     env:
       TARGET: ${{ inputs.platform }}/${{ inputs.arch }}/${{ inputs.format }}
@@ -80,11 +81,10 @@ jobs:
   macos:
     name: macOS install and chat
     needs: validate
-    if: inputs.platform == 'darwin'
-    runs-on: ${{ inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    if: ${{ (inputs.platform == 'darwin') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ${{ fromJSON(contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'windows') && contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'macos') && contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((inputs.arch == 'x64' && 'macos-15-intel' || 'macos-15'), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: 30
     # Also constrains the recording action's nested cache to read-only.
-    cache-mode: read
     env: &smoke-env
       RELEASE_COMMIT: ${{ inputs.sha }}
       RELEASE_TAG: ${{ inputs.tag }}
@@ -103,7 +103,7 @@ jobs:
         shell: bash
         run: printf 'SMOKE_ROOT=%s/bundle-smoke\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           # A dispatch tests the artifact of `sha` with the dispatched ref's scripts.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || inputs.channel-build != '' && inputs.controller-sha || inputs.sha }}
@@ -244,14 +244,13 @@ jobs:
   windows:
     name: Windows install and chat
     needs: validate
-    if: inputs.platform == 'win32'
+    if: ${{ (inputs.platform == 'win32') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     # GitHub-hosted for both arches: on blacksmith Windows runners the installed MSIX app exits
     # before Playwright attaches (every x64 smoke there failed; the same commit's arm64 MSIX on a
     # GitHub-hosted runner chats), as the install/update GUI legs did (f1b290e7734).
-    runs-on: ${{ inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core' }}
+    runs-on: ${{ fromJSON(contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'windows') && contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'macos') && contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((inputs.arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     # windows-11-arm runners are much slower (npm ci alone runs 12+ minutes and
     # the MSIX leg exceeds 30 total); x64 legs complete in ~14.
     timeout-minutes: 45
-    cache-mode: read
     env: *smoke-env
     steps: *smoke-steps

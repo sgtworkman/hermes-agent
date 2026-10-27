@@ -1,0 +1,48 @@
+name: Local runner verification
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/**']
+  pull_request:
+    paths: ['.github/workflows/**']
+
+permissions:
+  contents: read
+
+jobs:
+  verify-local-runner:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        kind: [linux-x64, linux-arm64, macos-arm64, macos-x64]
+    runs-on: ${{ fromJSON(matrix.kind == 'linux-arm64' && '["self-hosted","Linux","ARM64","workman-ci"]' || matrix.kind == 'macos-arm64' && '["self-hosted","macOS","ARM64","workman-ci"]' || matrix.kind == 'macos-x64' && '["self-hosted","macOS","X64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Verify executor and workflow routing
+        shell: bash
+        env:
+          EXECUTOR_ENVIRONMENT: ${{ runner.environment }}
+          EXECUTOR_NAME: ${{ runner.name }}
+          EXECUTOR_OS: ${{ runner.os }}
+          EXECUTOR_ARCH: ${{ runner.arch }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, platform, re
+          assert os.environ['EXECUTOR_ENVIRONMENT'] == 'self-hosted', 'A local runner is required'
+          files = sorted(p for p in pathlib.Path('.github/workflows').glob('*') if p.suffix in ['.yml', '.yaml'])
+          bad = []
+          count = 0
+          for path in files:
+              for number, line in enumerate(path.read_text().splitlines(), 1):
+                  if re.match(r'^\s*runs-on\s*:', line):
+                      count += 1
+                      if 'self-hosted' not in line:
+                          bad.append(str(path) + ':' + str(number))
+          assert not bad, 'Hosted or unresolved runner declarations: ' + ', '.join(bad)
+          print(json.dumps({'runner': os.environ['EXECUTOR_NAME'], 'environment': os.environ['EXECUTOR_ENVIRONMENT'], 'os': os.environ['EXECUTOR_OS'], 'arch': os.environ['EXECUTOR_ARCH'], 'machine': platform.machine(), 'ref': os.environ['GITHUB_REF'], 'sha': os.environ['GITHUB_SHA'], 'workflow_files_checked': len(files), 'runner_declarations_checked': count}, sort_keys=True))
+          PY

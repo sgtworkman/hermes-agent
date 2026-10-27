@@ -56,8 +56,9 @@ concurrency:
 
 jobs:
   bundle:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: bundle ${{ matrix.target.label }}
-    runs-on: ${{ matrix.target.runner }}
+    runs-on: ${{ fromJSON(contains((matrix.target.runner), 'windows') && contains((matrix.target.runner), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((matrix.target.runner), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((matrix.target.runner), 'macos') && contains((matrix.target.runner), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((matrix.target.runner), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((matrix.target.runner), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     # Leave time for setup, cache saves and smoke tests around the wheel build.
     timeout-minutes: 180
     strategy:
@@ -81,7 +82,7 @@ jobs:
           - label: win32-arm64
             runner: windows-latest-32-arm-core
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           # Default to the exact candidate commit (github.sha); inputs.ref
           # remains an escape hatch for a focused manual reproduction.

@@ -87,11 +87,7 @@ jobs:
   # ---- arm 1: script installs (the shared OS-agnostic driver) --------------
   e2e:
     name: install & update
-    if: >-
-      (inputs.install-method == 'installer-script'
-        || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop))
-      && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)
-        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))
+    if: ${{ ((inputs.install-method == 'installer-script' || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop)) && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method) || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/install-e2e-run.yml
     with:
       commit: ${{ inputs.commit }}
@@ -109,10 +105,8 @@ jobs:
     # Short static name on purpose: name expressions render UNEXPANDED on
     # skipped jobs.
     name: Hermes-Setup.dmg
-    if: >-
-      inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop
-      && contains(fromJSON('["open-app-update", "hermes-desktop-app-update", "hermes-update", "installer-script", "installer-script+desktop"]'), inputs.update-method)
-    runs-on: macos-latest
+    if: ${{ (inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop && contains(fromJSON('["open-app-update", "hermes-desktop-app-update", "hermes-update", "installer-script", "installer-script+desktop"]'), inputs.update-method)) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","macOS","ARM64","workman-ci"]
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
@@ -212,8 +206,8 @@ jobs:
   # run anywhere native coverage would be fake.
   bundled-e2e:
     name: packaged bundle (open-app-update)
-    if: inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update'
-    runs-on: ${{ inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    if: ${{ (inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ${{ fromJSON(contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'windows') && contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'macos') && contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15'), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:

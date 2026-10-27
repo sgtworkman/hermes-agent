@@ -41,12 +41,13 @@ concurrency:
 
 jobs:
   venv-holder-e2e:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: venv-holder live E2E (windows-latest)
-    runs-on: blacksmith-32vcpu-windows-2025
+    runs-on: ["self-hosted","Windows","X64","workman-ci"]
     timeout-minutes: 25
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           # The stable caller dispatches on the candidate tag; github.sha is
           # the exact candidate commit there and the head SHA everywhere else.

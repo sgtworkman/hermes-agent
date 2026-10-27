@@ -75,8 +75,9 @@ concurrency:
 
 jobs:
   os-tests:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(contains((matrix.runner), 'windows') && contains((matrix.runner), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((matrix.runner), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((matrix.runner), 'macos') && contains((matrix.runner), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((matrix.runner), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((matrix.runner), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
       fail-fast: false
@@ -107,7 +108,7 @@ jobs:
             slice: 2/2
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
 
@@ -220,7 +221,7 @@ jobs:
     # interpreter selection, non-ASCII profile paths and tool ACLs, partial-clone fetch and
     # venv holders. Its own workflow so wine2e-install/** pushes can run it alone.
     name: Windows install + update E2E
-    if: inputs.e2e_upgrade
+    if: ${{ (inputs.e2e_upgrade) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     uses: ./.github/workflows/windows-install-update-e2e.yml
     with:
       commit: ${{ inputs.commit }}
@@ -240,15 +241,15 @@ jobs:
     # Windows race that passes on retry is still a race. Tracked Windows bugs are strict
     # xfails (per-file KNOWN tables), so a fix turns this job red until the entry goes.
     name: Windows E2E (real processes)
-    if: inputs.e2e
+    if: ${{ (inputs.e2e) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     # 32-core like os-tests' Windows row: seven files run in parallel and each spawns
     # process trees; on the 4-vCPU image the suite step took 153-171 s (job 4.7-5.6 min),
     # here 124 s (job 3.1 min), with headroom against scheduling-starved timeouts.
-    runs-on: blacksmith-32vcpu-windows-2025
+    runs-on: ["self-hosted","Windows","X64","workman-ci"]
     timeout-minutes: 25
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
         with:
           ref: ${{ inputs.commit }}
 

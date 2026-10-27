@@ -89,12 +89,8 @@ jobs:
     # Desktop-surface methods (+desktop installs,
     # hermes-desktop-app-update) also need the starting tag to ship
     # apps/desktop (their flags shipped with it).
-    if: >-
-      (inputs.install-method == 'installer-script'
-        || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop))
-      && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)
-        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))
-    runs-on: ${{ inputs.runner }}
+    if: ${{ ((inputs.install-method == 'installer-script' || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop)) && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method) || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ${{ fromJSON(contains((inputs.runner), 'windows') && contains((inputs.runner), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((inputs.runner), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((inputs.runner), 'macos') && contains((inputs.runner), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((inputs.runner), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((inputs.runner), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:

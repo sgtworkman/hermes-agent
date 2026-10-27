@@ -129,8 +129,9 @@ env:
 
 jobs:
   pick-releases:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Pick release tags
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     outputs:
       tags: ${{ steps.pick.outputs.tags }}
@@ -193,9 +194,10 @@ jobs:
   # Expand the support matrix against the picked tags: one leg per
   # {os, install-method, update-method, tag}, split into a matrix per OS.
   generate-matrix:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Expand combinations
     needs: pick-releases
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     outputs:
       linux: ${{ steps.gen.outputs.linux }}
@@ -230,9 +232,10 @@ jobs:
             --format markdown >> "$GITHUB_STEP_SUMMARY"
 
   bundle-inputs:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Validate pinned bundle transitions
     # Bundled legs need dispatch-only manifests.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     outputs:
       windows: ${{ steps.inputs.outputs.windows }}
@@ -254,7 +257,7 @@ jobs:
 
   windows-bundled:
     name: ${{ matrix.name }}
-    if: inputs.windows-bundle-manifest != '' && contains(fromJSON('["all", "bundled", "windows-bundled"]'), inputs.route)
+    if: ${{ (inputs.windows-bundle-manifest != '' && contains(fromJSON('["all", "bundled", "windows-bundled"]'), inputs.route)) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: bundle-inputs
     strategy:
       fail-fast: false
@@ -271,7 +274,7 @@ jobs:
 
   macos-bundled:
     name: ${{ matrix.name }}
-    if: inputs.macos-bundle-manifest != '' && contains(fromJSON('["all", "bundled", "macos-bundled"]'), inputs.route)
+    if: ${{ (inputs.macos-bundle-manifest != '' && contains(fromJSON('["all", "bundled", "macos-bundled"]'), inputs.route)) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: bundle-inputs
     strategy:
       fail-fast: false
@@ -290,7 +293,7 @@ jobs:
     name: ${{ matrix.name }}
     # The generator applies the route; an OS it selected no legs for is skipped
     # (GitHub rejects an empty matrix).
-    if: needs.generate-matrix.outputs.linux-legs != '0'
+    if: ${{ (needs.generate-matrix.outputs.linux-legs != '0') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: generate-matrix
     strategy:
       # One leg breaking is worth knowing about even if another already
@@ -309,7 +312,7 @@ jobs:
 
   windows:
     name: ${{ matrix.name }}
-    if: needs.generate-matrix.outputs.windows-legs != '0'
+    if: ${{ (needs.generate-matrix.outputs.windows-legs != '0') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: generate-matrix
     strategy:
       fail-fast: false
@@ -326,7 +329,7 @@ jobs:
 
   macos:
     name: ${{ matrix.name }}
-    if: needs.generate-matrix.outputs.macos-legs != '0'
+    if: ${{ (needs.generate-matrix.outputs.macos-legs != '0') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: generate-matrix
     strategy:
       fail-fast: false
@@ -351,8 +354,9 @@ jobs:
   # (playback.html), ignoring the name: input -- harmless, the renderer
   # looks it up by that name.
   leg-player:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Upload leg player
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -378,9 +382,9 @@ jobs:
   # the source install/update paths.
   source-gate:
     name: Source matrix gate
-    if: always() && inputs.release == true
+    if: ${{ (always() && inputs.release == true) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [generate-matrix, linux, windows, macos]
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     steps:
       - name: Evaluate source legs
@@ -420,9 +424,9 @@ jobs:
   # the per-OS aggregates.
   report:
     name: Result chart
-    if: always()
+    if: ${{ (always()) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
     needs: [leg-player, pick-releases, linux, windows, macos, bundle-inputs, windows-bundled, macos-bundled]
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1

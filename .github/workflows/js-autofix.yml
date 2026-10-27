@@ -56,14 +56,15 @@ concurrency:
 
 jobs:
   generate-patch:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Generate eslint --fix patch
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 5
     outputs:
       has-fixes: ${{ steps.produce-patch.outputs.has-fixes }}
     # No permissions override → inherits workflow-level contents: read.
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
 
       - name: Set up locked Node and npm
         id: node
@@ -133,15 +134,15 @@ jobs:
     needs: generate-patch
     # Skip entirely when generate-patch found no fixes — saves a runner,
     # avoids a redundant checkout/download, and keeps the job graph honest.
-    if: needs.generate-patch.outputs.has-fixes == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ (needs.generate-patch.outputs.has-fixes == 'true') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Linux","X64","workman-ci"]
     timeout-minutes: 15
     environment: trusted-automation
     permissions:
       contents: write # needed to push to bot/js-autofix
       pull-requests: write # needed for PR creation + auto-merge
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v1
 
       - name: Get GitHub App token
         id: app-token

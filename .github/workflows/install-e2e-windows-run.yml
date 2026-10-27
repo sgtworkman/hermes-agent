@@ -111,8 +111,8 @@ env:
 jobs:
   bundled-e2e:
     name: packaged bundle (open-app-update)
-    if: inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update'
-    runs-on: ${{ inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core' }}
+    if: ${{ (inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update') && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ${{ fromJSON(contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'windows') && contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'arm') && '["self-hosted","Windows","ARM64","workman-ci"]' || contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'windows') && '["self-hosted","Windows","X64","workman-ci"]' || contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'macos') && contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'intel') && '["self-hosted","macOS","X64","workman-ci"]' || contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), 'macos') && '["self-hosted","macOS","ARM64","workman-ci"]' || contains((inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core'), '-arm') && '["self-hosted","Linux","ARM64","workman-ci"]' || '["self-hosted","Linux","X64","workman-ci"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -177,14 +177,8 @@ jobs:
     #     Update button to click, no -IncludeDesktop to pass);
     #   * open-app-update needs an OS entry point, which only the
     #     desktop-bearing installs create.
-    if: >-
-      (inputs.install-method == 'installer-script'
-        || (contains(fromJSON('["installer-script+desktop", "desktop-installer@latest"]'), inputs.install-method) && inputs.tag-has-desktop))
-      && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)
-        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update", "desktop-installer@latest"]'), inputs.update-method) && inputs.tag-has-desktop)
-        || (inputs.update-method == 'open-app-update' && inputs.tag-has-desktop
-            && contains(fromJSON('["desktop-installer@latest", "installer-script+desktop"]'), inputs.install-method)))
-    runs-on: windows-latest-32-core
+    if: ${{ ((inputs.install-method == 'installer-script' || (contains(fromJSON('["installer-script+desktop", "desktop-installer@latest"]'), inputs.install-method) && inputs.tag-has-desktop)) && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method) || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update", "desktop-installer@latest"]'), inputs.update-method) && inputs.tag-has-desktop) || (inputs.update-method == 'open-app-update' && inputs.tag-has-desktop && contains(fromJSON('["desktop-installer@latest", "installer-script+desktop"]'), inputs.install-method)))) && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ["self-hosted","Windows","X64","workman-ci"]
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     env:
