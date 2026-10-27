@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  verify-local-runner:
+  verify-local-runner-platforms:
+    name: verify-local-runner (${{ matrix.kind }})
     if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     strategy:
       max-parallel: 2
@@ -53,6 +54,27 @@ jobs:
           docker version --format '{{.Server.APIVersion}}'
           docker info --format '{{json .SecurityOptions}}'
           test "$(docker run --rm --network none busybox:1.37.0 uname -m)" = "$(uname -m)"
+      - name: Require local runners for every workflow job
+        shell: bash
+        run: python3 .github/scripts/local-runner-policy/local_runners.py --check-tree "$GITHUB_SHA"
+  verify-local-runner:
+    name: verify-local-runner
+    needs: verify-local-runner-platforms
+    if: ${{ always() && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: [self-hosted, Linux, ARM64, workman-ci]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Require every local platform verification to pass
+        shell: bash
+        env:
+          PLATFORM_VERIFICATION_RESULT: ${{ needs.verify-local-runner-platforms.result }}
+          EXECUTOR_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$EXECUTOR_ENVIRONMENT" = self-hosted
+          test "$PLATFORM_VERIFICATION_RESULT" = success
       - name: Require local runners for every workflow job
         shell: bash
         run: python3 .github/scripts/local-runner-policy/local_runners.py --check-tree "$GITHUB_SHA"
