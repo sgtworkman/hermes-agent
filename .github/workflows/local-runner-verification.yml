@@ -3,9 +3,7 @@ name: Local runner verification
 on:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/**', '.github/scripts/local-runner-policy/**']
   pull_request:
-    paths: ['.github/workflows/**', '.github/scripts/local-runner-policy/**']
 
 permissions:
   contents: read
