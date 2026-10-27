@@ -16,7 +16,7 @@ name: OSV-Scanner
 # code patterns in PR diffs) by covering the orthogonal "currently-pinned
 # dep became known-vulnerable" case.
 #
-# Uses Google's officially-recommended reusable workflow, pinned by SHA.
+# Uses a local copy of Google's pinned reusable workflow with local runner routing.
 # Findings land in the repo's Security tab (Code Scanning > OSV-Scanner).
 # fail-on-vuln is disabled so the job does not block merges on pre-existing
 # vulnerabilities in pinned deps that we may need to patch deliberately.
@@ -38,7 +38,7 @@ jobs:
   scan:
     if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository) }}
     name: Scan lockfiles
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    uses: ./.github/workflows/osv-scanner-local.yml
     with:
       # Scan explicit lockfiles rather than recursing, so we only look at
       # the five sources of truth and skip vendored / test / worktree dirs.
