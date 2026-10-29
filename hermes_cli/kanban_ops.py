@@ -110,6 +110,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 {"task_id": tid, "reason": reason}
                 for (tid, reason) in res.respawn_guarded
             ],
+            "parked_unresolvable_skills": [
+                {"task_id": tid, "missing_skills": missing}
+                for (tid, missing) in res.parked_unresolvable_skills
+            ],
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
@@ -146,6 +150,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    for tid, missing in res.parked_unresolvable_skills:
+        print(f"Parked (assignee cannot load skills {', '.join(missing)}): {tid}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     if res.rate_limited:

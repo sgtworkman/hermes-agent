@@ -236,7 +236,7 @@ _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "reaped_terminal_workers", "crashed", "stale",
     "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
-    "skipped_nonspawnable",
+    "skipped_nonspawnable", "parked_unresolvable_skills",
 )
 
 
@@ -1114,44 +1114,9 @@ def _project_from_source_task(
     return project_obj, project_repo
 
 
-def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
-    """Strip/dedupe a skills list. Commas are refused (a comma-joined string must
-    not land in one argv slot); toolset names are rejected all at once because
-    agents that confuse the two usually pass several."""
-    if skills is None:
-        return None
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    toolset_typos: list[str] = []
-    for s in skills:
-        if not s:
-            continue
-        name = str(s).strip()
-        if not name:
-            continue
-        if "," in name:
-            raise ValueError(
-                f"skill name cannot contain comma: {name!r} "
-                f"(pass a list of separate names instead of a comma-joined string)"
-            )
-        if name.casefold() in KNOWN_TOOLSET_NAMES:
-            toolset_typos.append(name)
-            continue
-        if name in seen:
-            continue
-        seen.add(name)
-        cleaned.append(name)
-    if toolset_typos:
-        quoted = ", ".join(repr(n) for n in toolset_typos)
-        noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
-        raise ValueError(
-            f"{quoted} {noun}, not skill name(s). "
-            "Put toolsets in the assignee profile's `toolsets:` config "
-            "instead of per-task skills. Skills are named skill bundles "
-            "(e.g. `blogwatcher`, `github-code-review`); toolsets are runtime "
-            "capabilities (e.g. `web`, `browser`, `terminal`)."
-        )
-    return cleaned
+# The body lives in ``kanban_db_skills`` (this facade is over its line ratchet);
+# re-exported here so it stays patchable as ``kanban_db._normalize_task_skills``.
+from hermes_cli.kanban_db_skills import _normalize_task_skills
 
 
 def create_task(
@@ -1220,7 +1185,8 @@ def create_task(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
     parents = tuple(p for p in parents if p)
-    skills_list = _normalize_task_skills(skills)
+    from hermes_cli.kanban_db_skills import _check_task_skills
+    skills_list = _check_task_skills(conn, skills, assignee)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
