@@ -170,6 +170,24 @@ class AuthorityConnection:
         every profile this process serves; any other grant is bound to its own profile."""
         return self._identity.get('profile_scope') == 'host'
 
+    def _connection_for(self, authority):
+        connection = self._siblings.get(authority.profile_id)
+        if connection is None or connection.authority is not authority:
+            identity = dict(self._identity, profile_id=authority.profile_id, instance_id=authority.instance_id)
+            connection = AuthorityConnection(authority, self.transport, identity, operator=self._operator)
+            self._siblings[authority.profile_id] = connection
+        return connection
+
+    def _replacement(self):
+        """A hot restart replaces our own profile's authority without closing its native socket."""
+        registry = getattr(getattr(self.authority, 'runner', None), 'session_authorities', None)
+        if registry is None or not getattr(self.authority, 'retired', False):
+            return None
+        current = registry.for_home(self.authority.profile_id)
+        if current is not None and current is not self.authority:
+            return self._connection_for(current)
+        return None
+
     def _sibling_for(self, profile):
         """Connection bound to the sibling authority a ``profile`` param names, or None for our own
         home. Only a host-scoped grant (the Desktop's shared-primary socket, the dashboard gate)
@@ -183,14 +201,9 @@ class AuthorityConnection:
         registry = getattr(getattr(self.authority, 'runner', None), 'session_authorities', None)
         for sibling in (registry or ()):
             if sibling is not self.authority and profile_matches_home(profile, Path(sibling.profile_id)):
-                connection = self._siblings.get(sibling.profile_id)
                 # A re-served profile is a new authority under the same id: never keep routing to
                 # the retired one (it refuses every admission for the rest of this socket's life).
-                if connection is None or connection.authority is not sibling:
-                    identity = dict(self._identity, profile_id=sibling.profile_id, instance_id=sibling.instance_id)
-                    connection = AuthorityConnection(sibling, self.transport, identity, operator=self._operator)
-                    self._siblings[sibling.profile_id] = connection
-                return connection
+                return self._connection_for(sibling)
         if registry is not None and registry.starting(profile) is not None:
             # Hot-serve is still building it: retryable, not the final verdict for an unserved profile.
             # A shared socket holds such a frame until the start ends (``awaits_profile_start``); this
@@ -316,6 +329,9 @@ class AuthorityConnection:
             # unknown keys; every other handler validates ``profile`` itself.
             if method in _PROFILE_IMPLICIT:
                 params = {key: value for key, value in params.items() if key != 'profile'}
+        replacement = self._replacement()
+        if replacement is not None:
+            return await replacement.dispatch(request)
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         from tui_gateway.contracts.registry import (
             CANONICAL_METHODS, METHODS, canonical_param_problems, check_params_accepted, check_result,
